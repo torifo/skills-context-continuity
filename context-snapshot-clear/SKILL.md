@@ -11,19 +11,23 @@ description: Use when context is above 70% - preserves complete session state in
 
 説明ではなく実物を記録する。コードは実際のコード、エラーはverbatim、次のアクションは実行できるコマンド。
 
-## Phase 1: 状態収集（書く前に実行）
+**速度の大原則：モデルが書き出すのは「会話にしか存在しない情報」だけ。ディスク上に既にあるもの（git diff・保存済みコード）はシェルで退避してパス参照する。** 出力トークンの再生成が最大の時間コストであり、復元時の注入量も膨らませる。
+
+## Phase 1: 状態収集＋git退避（1コマンドで完結）
+
+パス取得と git 状態の退避を **1回の Bash** で行う（cwd がキー。`/clear` は session_id を作り直すため session_id では復元できない。必ず作業ディレクトリで実行）：
 
 ```bash
-# Git状態を取得
-git status 2>/dev/null && git diff 2>/dev/null | head -200
-
-# 直近の変更ファイルの内容確認
-# (作業中のファイルをReadツールで読む)
+SNAP="$(bash ~/.claude/hooks/snapshot-path.sh)"
+{ git status; echo '=== DIFF ==='; git diff; echo '=== STAGED ==='; git diff --cached; } > "${SNAP%.md}.git.txt" 2>/dev/null
+echo "$SNAP"
 ```
+
+作業中ファイルの再 Read は**しない**（内容は既にコンテキストにある。再読は時間の無駄）。
 
 ## Phase 2: スナップショット作成
 
-`~/.claude/context_snapshot.md` に書き込む。**全セクション必須**：
+Phase 1 で得たパスに Write ツールで書き込む。**該当する内容がないセクションは「なし」の1行だけにする**（空テンプレの複写は禁止）。**diff や保存済みコードは貼らない**（.git.txt を参照）：
 
 ````markdown
 # Claude Context Snapshot
@@ -61,9 +65,9 @@ Context at Save: XX%
 - [タスク名]
   - 現在地: [どこまで実装したか、ファイル:行番号]
   - 残り: [何が未完成か]
-  - 現在のコード:
+  - コード: [ディスクに保存済みなら file:行番号 参照のみ。**貼るのはディスクに存在しない断片だけ**（未保存の設計・書きかけでまだ書き込んでいないコード）]
     ```[言語]
-    [実際の半完成コード全体。省略しない]
+    [未保存の断片がある場合のみ。保存済みコードの複写は禁止]
     ```
 
 ### 未着手
@@ -76,9 +80,7 @@ Context at Save: XX%
 ### [path/to/file.ext]
 **変更内容**: [何を変えたか]
 **理由**: [なぜ変えたか]
-```diff
-[git diff の出力、またはbefore/after]
-```
+（diff は貼らない — `<スナップショットパス>.git.txt` に verbatim で退避済み。git 管理外の変更のみ before/after を貼る）
 
 ---
 
@@ -97,13 +99,8 @@ Context at Save: XX%
 
 ## Git状態
 
-```
-[git status の出力]
-```
-
-```diff
-[git diff の主要部分 — 長すぎる場合は最重要部分のみ]
-```
+verbatim 全量を退避済み → `Read <スナップショットパス（.md を .git.txt に変えたもの）>`
+[status の要点を2〜3行で（ブランチ名・未コミット件数）。diff の複写はしない]
 
 ---
 
@@ -133,7 +130,7 @@ Context at Save: XX%
 | エラーはverbatimか | 「型エラーが出た」 | `Type 'string' is not assignable to...` |
 | ユーザーへの確認が0件で続けられるか | — | **これが最終基準** |
 
-**NGが1つでもあれば書き直す。**
+**NGがあれば、Edit ツールで該当セクションだけ直す（全文の書き直しは禁止 — 時間が倍になる）。**
 
 ## Phase 4: clear実行
 
@@ -143,17 +140,24 @@ Context at Save: XX%
 
 ## Phase 5: 復元（clear後の最初の行動）
 
-1. `Read ~/.claude/context_snapshot.md` を実行
+スナップショットは **cwd をキー**にしているので、`/clear` で session_id が変わっても `snapshot-path.sh` は clear 後も同じパスを返す（同じ作業ディレクトリにいる限り）。UserPromptSubmit フックが自動注入もする。復元系コマンドは必ずスナップショットを作成した作業ディレクトリで実行すること。
+
+1. `Read "$(bash ~/.claude/hooks/snapshot-path.sh)"` を実行（フックが既に注入済みなら不要）
 2. ユーザーへ報告：「コンテキストを復元しました。[ゴール]の続きから：[次のアクション1]を実行します」
-3. 「次のアクション」から即作業開始
-4. ファイル削除：`rm ~/.claude/context_snapshot.md`
+3. 「次のアクション」から即作業開始（git の詳細が必要になったら `.git.txt` をその時点で Read する — 先読みしない）
+4. ファイル削除（.git.txt も一緒に）：
+
+```bash
+SNAP="$(bash ~/.claude/hooks/snapshot-path.sh)"; rm -f "$SNAP" "${SNAP%.md}.git.txt"
+```
 
 ## よくある失敗
 
 | 失敗 | 正しい対処 |
 |---|---|
-| コードを「修正中」と書いて実物を省く | 実際のコードをコピーして貼る |
-| エラーを要約して書く | エラー出力全体をverbatimで貼る |
+| 未保存の書きかけコードを「修正中」と書いて実物を省く | ディスクにない断片は実物を貼る（保存済みなら file:行 参照） |
+| 保存済みコードや git diff をスナップショットに複写する | .git.txt / file:行 参照にする（複写は作成と注入の両方を遅くする） |
+| エラーを要約して書く | エラー出力全体をverbatimで貼る（エラーは会話にしか存在しない） |
 | 「次はXを実装する」と書く | `bun run build && bun test` のような実行可能な形で書く |
 | 会話のやり取りを省く | ユーザーの訂正・フィードバックは必ず記録する |
-| 「重要なコンテキスト」を空欄にする | このセッションで発見した全ての非自明な情報を書く |
+| 空セクションにテンプレの雛形を複写する | 「なし」の1行にする |
