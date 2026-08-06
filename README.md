@@ -4,7 +4,7 @@
 
 ## English
 
-### skills-context-snapshot-clear
+### skills-context-continuity
 
 > Context snapshot, clear, and restore — seamless session continuity for Claude Code
 
@@ -21,10 +21,10 @@ Two [Claude Code](https://claude.ai/code) skills plus the hooks that make them a
 #### Install
 
 ```bash
-git clone https://github.com/torifo/skills-context-snapshot-clear /tmp/scsc
-cp -r /tmp/scsc/context-snapshot-clear /tmp/scsc/context-restore ~/.claude/skills/
+git clone https://github.com/torifo/skills-context-continuity /tmp/skills-context-continuity
+cp -r /tmp/skills-context-continuity/context-snapshot-clear /tmp/skills-context-continuity/context-restore ~/.claude/skills/
 mkdir -p ~/.claude/hooks
-cp /tmp/scsc/hooks/snapshot-path.sh /tmp/scsc/hooks/restore-context.sh ~/.claude/hooks/
+cp /tmp/skills-context-continuity/hooks/snapshot-path.sh /tmp/skills-context-continuity/hooks/restore-context.sh ~/.claude/hooks/
 ```
 
 Then register the hook: merge `hooks/settings.example.json` into your `~/.claude/settings.json` (the `UserPromptSubmit` entry). Without the hook the skills still work — you just run the restore step manually.
@@ -49,7 +49,7 @@ After `/clear`, just send any prompt — the hook injects the snapshot automatic
 
 ## 日本語
 
-### skills-context-snapshot-clear
+### skills-context-continuity
 
 > コンテキストのスナップショット保存・クリア・復元 — Claude Code のセッション継続をシームレスに
 
@@ -66,10 +66,10 @@ After `/clear`, just send any prompt — the hook injects the snapshot automatic
 #### インストール
 
 ```bash
-git clone https://github.com/torifo/skills-context-snapshot-clear /tmp/scsc
-cp -r /tmp/scsc/context-snapshot-clear /tmp/scsc/context-restore ~/.claude/skills/
+git clone https://github.com/torifo/skills-context-continuity /tmp/skills-context-continuity
+cp -r /tmp/skills-context-continuity/context-snapshot-clear /tmp/skills-context-continuity/context-restore ~/.claude/skills/
 mkdir -p ~/.claude/hooks
-cp /tmp/scsc/hooks/snapshot-path.sh /tmp/scsc/hooks/restore-context.sh ~/.claude/hooks/
+cp /tmp/skills-context-continuity/hooks/snapshot-path.sh /tmp/skills-context-continuity/hooks/restore-context.sh ~/.claude/hooks/
 ```
 
 フック登録：`hooks/settings.example.json` の `UserPromptSubmit` エントリを `~/.claude/settings.json` にマージしてください。フックなしでもスキル自体は動きます（復元手順を手動で実行する形になります）。
