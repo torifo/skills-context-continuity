@@ -23,6 +23,14 @@ SNAP="$(bash ~/.claude/hooks/snapshot-path.sh)"
 echo "$SNAP"
 ```
 
+Windows の PowerShell で実行する場合（bash 版と同じパスになるので、どちらで実行してもよい）：
+
+```powershell
+$SNAP = & "$env:USERPROFILE\.claude\hooks\snapshot-path.ps1"
+& { git status; '=== DIFF ==='; git diff; '=== STAGED ==='; git diff --cached } 2>$null | Set-Content -Encoding utf8 ($SNAP -replace '\.md$', '.git.txt')
+$SNAP
+```
+
 作業中ファイルの再 Read は**しない**（内容は既にコンテキストにある。再読は時間の無駄）。
 
 ## Phase 2: スナップショット作成
@@ -142,13 +150,17 @@ verbatim 全量を退避済み → `Read <スナップショットパス（.md �
 
 スナップショットは **cwd をキー**にしているので、`/clear` で session_id が変わっても `snapshot-path.sh` は clear 後も同じパスを返す（同じ作業ディレクトリにいる限り）。UserPromptSubmit フックが自動注入もする。復元系コマンドは必ずスナップショットを作成した作業ディレクトリで実行すること。
 
-1. `Read "$(bash ~/.claude/hooks/snapshot-path.sh)"` を実行（フックが既に注入済みなら不要）
+1. `Read "$(bash ~/.claude/hooks/snapshot-path.sh)"` を実行（PowerShell では `& "$env:USERPROFILE\.claude\hooks\snapshot-path.ps1"` が出したパスを Read。フックが既に注入済みなら不要）
 2. ユーザーへ報告：「コンテキストを復元しました。[ゴール]の続きから：[次のアクション1]を実行します」
 3. 「次のアクション」から即作業開始（git の詳細が必要になったら `.git.txt` をその時点で Read する — 先読みしない）
 4. ファイル削除（.git.txt も一緒に）：
 
 ```bash
 SNAP="$(bash ~/.claude/hooks/snapshot-path.sh)"; rm -f "$SNAP" "${SNAP%.md}.git.txt"
+```
+
+```powershell
+$SNAP = & "$env:USERPROFILE\.claude\hooks\snapshot-path.ps1"; Remove-Item -LiteralPath $SNAP, ($SNAP -replace '\.md$', '.git.txt') -Force -ErrorAction SilentlyContinue
 ```
 
 ## よくある失敗
