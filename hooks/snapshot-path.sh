@@ -18,6 +18,12 @@
 # Arg 1: working directory. Falls back to $PWD when no argument is given.
 DIR="${1:-$PWD}"
 [ -z "$DIR" ] && DIR="unknown"
+BASE="$HOME"
+# Git Bash on Windows: key off the Windows form (C:/x, drive upper-cased), as restore-context.ps1 does.
+if command -v cygpath >/dev/null 2>&1; then
+    winpath() { local p; p=$(cygpath -m "$1"); case "$p" in [a-z]:*) p=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')${p:1} ;; esac; printf '%s' "$p"; }
+    DIR=$(winpath "$DIR"); BASE=$(winpath "${USERPROFILE:-$HOME}")
+fi
 # Encode the path the way Claude encodes project dirs: every non-alphanumeric -> '-'
 KEY=$(printf '%s' "$DIR" | LC_ALL=C sed 's#[^A-Za-z0-9]#-#g')
-printf '%s/.claude/context_snapshot_%s.md\n' "$HOME" "$KEY"
+printf '%s/.claude/context_snapshot_%s.md\n' "$BASE" "$KEY"

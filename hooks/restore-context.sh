@@ -14,20 +14,27 @@
 #
 # encode (${x//[!0-9A-Za-z]/-}) MUST stay identical to snapshot-path.sh's sed.
 # Both run under LC_ALL=C: otherwise multibyte names (日本語) encode per byte or per char by locale.
+# restore-context.ps1 is the PowerShell twin of this file (native Windows): keep the two in step.
 
 INPUT=$(cat)
 extract() { # $1 = json key
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$INPUT" | jq -r ".$1 // empty"
     else
-        printf '%s' "$INPUT" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+        printf '%s' "$INPUT" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1 | sed 's/\\\\/\\/g'
     fi
 }
 CWD=$(extract cwd)
 [ -z "$CWD" ] && CWD="$PWD"
 
-SNAPDIR="$HOME/.claude"
+HOME_DIR="$HOME"
 LC_ALL=C
+# Git Bash on Windows: cwd arrives as C:\x while $PWD is /c/x. Work in C:/x, the form snapshot-path.sh keys off.
+if command -v cygpath >/dev/null 2>&1; then
+    winpath() { local p; p=$(cygpath -m "$1"); case "$p" in [a-z]:*) p=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')${p:1} ;; esac; printf '%s' "$p"; }
+    CWD=$(winpath "$CWD"); HOME_DIR=$(winpath "${USERPROFILE:-$HOME}")
+fi
+SNAPDIR="$HOME_DIR/.claude"
 is_fresh() { [ -f "$1" ] && find "$1" -mmin -60 2>/dev/null | grep -q .; }
 emit_snapshot() { # $1 = snapshot path
     echo "=== CONTEXT SNAPSHOT (自動復元) ==="
@@ -60,8 +67,10 @@ for snap in "$SNAPDIR"/context_snapshot_*.md; do
     # ancestor of cwd. Confirm by walking cwd upward (real paths, unambiguous).
     if [ "${CWD_KEY#"$key"-}" != "$CWD_KEY" ]; then
         p="$CWD"
-        while [ -n "$p" ] && [ "$p" != "/" ]; do
-            p="$(dirname "$p")"
+        while :; do
+            np="$(dirname "$p")"
+            { [ "$np" = "$p" ] || [ "$np" = "." ]; } && break   # "." : Windows C:/x tops out at C: then .
+            p="$np"
             if [ "${p//[!0-9A-Za-z]/-}" = "$key" ] && [ -d "$p" ]; then
                 matches+=("$p|$snap"); break
             fi
@@ -77,7 +86,7 @@ done
 
 # Confirm descendant candidates by enumerating real dirs under cwd. Skipped for
 # $HOME and / (too broad) and when there are no descendant candidates at all.
-if [ "${#desc[@]}" -gt 0 ] && [ -d "$CWD" ] && [ "$CWD" != "$HOME" ] && [ "$CWD" != "/" ]; then
+if [ "${#desc[@]}" -gt 0 ] && [ -d "$CWD" ] && [ "$CWD" != "$HOME_DIR" ] && [ "$CWD" != "/" ]; then
     while IFS= read -r d; do
         dk="${d//[!0-9A-Za-z]/-}"
         for ent in "${desc[@]}"; do
