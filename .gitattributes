@@ -1,0 +1,2 @@
+# Git for Windows checks out CRLF by default; Git Bash then fails on '\r' in the hooks.
+*.sh text eol=lf
