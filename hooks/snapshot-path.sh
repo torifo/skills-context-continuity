@@ -19,5 +19,5 @@
 DIR="${1:-$PWD}"
 [ -z "$DIR" ] && DIR="unknown"
 # Encode the path the way Claude encodes project dirs: every non-alphanumeric -> '-'
-KEY=$(printf '%s' "$DIR" | sed 's#[^A-Za-z0-9]#-#g')
+KEY=$(printf '%s' "$DIR" | LC_ALL=C sed 's#[^A-Za-z0-9]#-#g')
 printf '%s/.claude/context_snapshot_%s.md\n' "$HOME" "$KEY"

@@ -13,6 +13,7 @@
 # hierarchy is ambiguous it lists them and stays hands-off.
 #
 # encode (${x//[!0-9A-Za-z]/-}) MUST stay identical to snapshot-path.sh's sed.
+# Both run under LC_ALL=C: otherwise multibyte names (日本語) encode per byte or per char by locale.
 
 INPUT=$(cat)
 extract() { # $1 = json key
@@ -26,6 +27,7 @@ CWD=$(extract cwd)
 [ -z "$CWD" ] && CWD="$PWD"
 
 SNAPDIR="$HOME/.claude"
+LC_ALL=C
 is_fresh() { [ -f "$1" ] && find "$1" -mmin -60 2>/dev/null | grep -q .; }
 emit_snapshot() { # $1 = snapshot path
     echo "=== CONTEXT SNAPSHOT (自動復元) ==="
