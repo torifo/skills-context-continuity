@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& ([scriptblock]::Create([IO.File]::ReadAllText(\"$env:USERPROFILE\\.claude\\hooks\\restore-context.ps1\")))"
+          }
+        ]
+      }
+    ]
+  }
+}
