@@ -87,11 +87,11 @@ if [ "${#desc[@]}" -gt 0 ] && [ -d "$CWD" ] && [ "$CWD" != "$HOME" ] && [ "$CWD"
                  -o -type d -print 2>/dev/null)
 fi
 
-# Dedup.
-declare -A seen=(); declare -a uniq=()
+# Dedup. A newline-joined string, not `declare -A`: macOS /bin/bash is 3.2.
+seen=$'\n'; declare -a uniq=()
 for m in "${matches[@]}"; do
-    [ -n "${seen[$m]:-}" ] && continue
-    seen[$m]=1; uniq+=("$m")
+    case "$seen" in *$'\n'"$m"$'\n'*) continue ;; esac
+    seen="$seen$m"$'\n'; uniq+=("$m")
 done
 
 if [ "${#uniq[@]}" -eq 1 ]; then
