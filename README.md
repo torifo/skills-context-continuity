@@ -60,7 +60,7 @@ After `/clear`, just send any prompt — the hook injects the snapshot automatic
 
 #### /context-refresh (keep the session id)
 
-Experimental: covered by the mod's tests (`claude plugin test mods/context-refresh`), not yet proven over long real sessions.
+Experimental. Checked with the mod's tests (`claude plugin test mods/context-refresh`) and in a real desktop-app session: the conversation went from 813,930 tokens to 1,435 in 21 ms with the same session id, and the restore turn started at about the size of a brand-new session.
 
 `/clear` starts a new session, so the conversation before it ends up in a different `/resume` entry. `/context-refresh` keeps the same session and still ends with an almost empty context:
 
@@ -84,7 +84,9 @@ Then add the mod folder to `~/.claude/settings.json` and start a new session:
 { "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
 ```
 
-The setting is read when a session's process starts, so a session that was already running before you installed the mod (a long-lived desktop app session, for example) does not have it. Open a new session. `claude plugin list` shows `context-refresh@inline ... ✔ loaded` when the setting is picked up.
+The setting is read when a session's process starts, so a session that was already running before you installed the mod (a long-lived desktop app session, for example) does not have it. Restart that process and reopen the session: quit the desktop app with ⌘Q and open the session again, or in a terminal exit and run `claude --resume <session id>`. The session id stays the same and the mod is loaded. `claude plugin list` shows `context-refresh@inline ... ✔ loaded` when the setting is picked up.
+
+If you ask for a refresh in a session without the mod, `context-snapshot-refresh` writes no snapshot and tells you to restart instead. A snapshot left on disk would be injected into your next prompt and mix a restore into the refresh.
 
 Optional, read from `~/.claude/hooks/` if present (not bundled):
 
@@ -160,7 +162,7 @@ Copy-Item -Force "$src\hooks\*.ps1", "$src\hooks\*.sh" "$env:USERPROFILE\.claude
 
 #### /context-refresh（session id を維持）
 
-試験的な機能です。mod のテスト（`claude plugin test mods/context-refresh`）は通っていますが、実際の長いセッションでの実績はまだありません。
+試験的な機能です。mod のテスト（`claude plugin test mods/context-refresh`）に加えて、実際のデスクトップアプリのセッションでも確認しました。会話は 813,930 トークンから 1,435 トークンになり（21ms）、session id は変わらず、復元のターンは新しいセッションとほぼ同じ大きさから始まりました。
 
 `/clear` は新しいセッションを始めるので、それ以前の会話は `/resume` で別の項目になります。`/context-refresh` は同じセッションのまま、コンテキストをほぼ空にします：
 
@@ -184,7 +186,9 @@ mkdir -p ~/.claude/mods && cp -r /tmp/skills-context-continuity/mods/context-ref
 { "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
 ```
 
-この設定はセッションのプロセスが起動するときに読まれます。mod を入れる前から動いているセッション（長く開いたままのデスクトップアプリのセッションなど）には入らないので、新しいセッションを開いてください。設定が読まれていれば、`claude plugin list` に `context-refresh@inline ... ✔ loaded` と出ます。
+この設定はセッションのプロセスが起動するときに読まれます。mod を入れる前から動いているセッション（長く開いたままのデスクトップアプリのセッションなど）には入りません。プロセスを起動し直してセッションを開き直してください。デスクトップアプリなら ⌘Q で終了してそのセッションを開き直し、ターミナルなら終了して `claude --resume <session id>` を実行します。session id はそのままで、mod が入ります。設定が読まれていれば、`claude plugin list` に `context-refresh@inline ... ✔ loaded` と出ます。
+
+mod が入っていないセッションでリフレッシュを頼むと、`context-snapshot-refresh` はスナップショットを書かずに、再起動するよう案内します。書いてしまうと次のプロンプトで先に注入され、リフレッシュと復元が混ざるためです。
 
 次のファイルが `~/.claude/hooks/` にあれば使います（同梱していません）：
 

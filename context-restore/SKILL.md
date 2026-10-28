@@ -1,13 +1,13 @@
 ---
 name: context-restore
-description: Use when context_snapshot.md exists in ~/.claude and is under 60 minutes old - reads the snapshot, reports restored state, resumes work, then deletes the file. Triggered automatically after /clear via UserPromptSubmit hook.
+description: Use when a context snapshot is injected (=== CONTEXT SNAPSHOT ===) - ~/.claude/context_snapshot_<cwd>.md under 60 minutes old, after /clear, /context-refresh or a new session in the same directory - reads the snapshot, reports restored state, resumes work, then deletes the file. Injected automatically by the UserPromptSubmit hook.
 ---
 
 # Context Restore
 
 ## Overview
 
-Restores previous session state from the snapshot file (`~/.claude/context_snapshot_<cwd>.md`, path resolved by `~/.claude/hooks/snapshot-path.sh`; Windows PowerShell: `snapshot-path.ps1`, same path) after `/clear` or session restart. Keyed by **working directory**, not `session_id`, because `/clear` mints a new `session_id` — cwd is the only handle that survives a clear. The snapshot is injected automatically into context by a hook. (Trade-off: two sessions clearing in the same directory share one snapshot.)
+Restores previous session state from the snapshot file (`~/.claude/context_snapshot_<cwd>.md`, path resolved by `~/.claude/hooks/snapshot-path.sh`; Windows PowerShell: `snapshot-path.ps1`, same path) after `/clear`, `/context-refresh` or session restart. Keyed by **working directory**, not `session_id`, because `/clear` mints a new `session_id` — cwd is the only handle that survives a clear. The snapshot is injected automatically into context by a hook. (Trade-off: two sessions clearing in the same directory share one snapshot.)
 
 ## When the Snapshot Appears
 
