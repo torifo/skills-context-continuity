@@ -71,11 +71,19 @@ Experimental. Checked with the mod's tests (`claude plugin test mods/context-ref
 
 You can also just ask for it in plain words (「コンテキストリフレッシュして」, "refresh the context"). The mod registers a tool, `mcp__context-refresh__refresh`, that Claude calls first; Claude then writes the snapshot in the same turn and the mod does the rest. It also starts by itself when a turn ends normally with the context at 90% or more.
 
-Install (needs `bash`, so macOS, Linux or WSL; the mod does not run on native Windows):
+Install (macOS, Linux, WSL and native Windows). The mod runs inside Claude Code and calls no shell; on Windows it uses `USERPROFILE` and the `C:/…` form of paths, as `snapshot-path.ps1` does. Windows is checked with the mod's tests under Windows paths, not yet on a real machine.
 
 ```bash
 cp -r /tmp/skills-context-continuity/context-snapshot-refresh ~/.claude/skills/
 mkdir -p ~/.claude/mods && cp -r /tmp/skills-context-continuity/mods/context-refresh ~/.claude/mods/
+```
+
+Native Windows (PowerShell, `$src` as in the Windows section above):
+
+```powershell
+Copy-Item -Recurse -Force "$src\context-snapshot-refresh" "$env:USERPROFILE\.claude\skills\"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\mods" | Out-Null
+Copy-Item -Recurse -Force "$src\mods\context-refresh" "$env:USERPROFILE\.claude\mods\"
 ```
 
 Then add the mod folder to `~/.claude/settings.json` and start a new session:
@@ -91,7 +99,7 @@ If you ask for a refresh in a session without the mod, `context-snapshot-refresh
 Optional, read from `~/.claude/hooks/` if present (not bundled):
 
 - `ctx-config.sh` setting `CTX_AUTO_REFRESH_THRESHOLD` changes the 90% trigger.
-- `ctx-notify-send.sh "<title>" "<subtitle>" "<body>"` sends a desktop notification when an automatic run starts or finishes, and whenever a run stops partway (manual runs too). Without it you only get in-terminal toasts, which the desktop app does not show.
+- `ctx-notify-send.sh "<title>" "<subtitle>" "<body>"` sends a desktop notification when an automatic run starts or finishes, and whenever a run stops partway (manual runs too). Without it (and always on Windows) the mod raises Claude Code's own notification instead; in the desktop app that reaches only your `Notification` hooks.
 
 #### Tuning knobs (defaults are deliberate — change them here if you want different behavior)
 
@@ -173,11 +181,19 @@ Copy-Item -Force "$src\hooks\*.ps1", "$src\hooks\*.sh" "$env:USERPROFILE\.claude
 
 普通の言葉で頼むこともできます（「コンテキストリフレッシュして」など）。mod が `mcp__context-refresh__refresh` というツールを登録しており、Claude はまずそれを呼び、同じターンでスナップショットを書きます。残りは mod が進めます。ターンが普通に終わった時点でコンテキストが 90% 以上なら、自動で始まります。
 
-インストール（`bash` が必要なので macOS・Linux・WSL 向け。ネイティブ Windows では mod は動きません）：
+インストール（macOS・Linux・WSL・ネイティブ Windows）。mod は Claude Code の中で動き、シェルを呼びません。Windows では `snapshot-path.ps1` と同じく `USERPROFILE` と `C:/…` 形式のパスを使います。Windows は Windows 形式のパスでの mod のテストで確認しており、実機ではまだ試していません。
 
 ```bash
 cp -r /tmp/skills-context-continuity/context-snapshot-refresh ~/.claude/skills/
 mkdir -p ~/.claude/mods && cp -r /tmp/skills-context-continuity/mods/context-refresh ~/.claude/mods/
+```
+
+ネイティブ Windows（PowerShell。`$src` は上の Windows の節と同じ）：
+
+```powershell
+Copy-Item -Recurse -Force "$src\context-snapshot-refresh" "$env:USERPROFILE\.claude\skills\"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\mods" | Out-Null
+Copy-Item -Recurse -Force "$src\mods\context-refresh" "$env:USERPROFILE\.claude\mods\"
 ```
 
 続けて `~/.claude/settings.json` に mod のフォルダを追加し、新しいセッションを始めます：
@@ -193,7 +209,7 @@ mod が入っていないセッションでリフレッシュを頼むと、`con
 次のファイルが `~/.claude/hooks/` にあれば使います（同梱していません）：
 
 - `ctx-config.sh` の `CTX_AUTO_REFRESH_THRESHOLD` で、自動起動の 90% を変えられます。
-- `ctx-notify-send.sh "<タイトル>" "<サブタイトル>" "<本文>"` があれば、自動実行の開始・完了と、途中で止まったとき（手動でも）をデスクトップ通知します。無ければターミナル内のトーストだけで、デスクトップアプリには表示されません。
+- `ctx-notify-send.sh "<タイトル>" "<サブタイトル>" "<本文>"` があれば、自動実行の開始・完了と、途中で止まったとき（手動でも）をデスクトップ通知します。無ければ（Windows では常に）Claude Code 標準の通知を使います。デスクトップアプリでは、`Notification` フックにだけ届きます。
 
 #### 調整ポイント（デフォルトは意図的な設計です — 変えたい場合はここ）
 
