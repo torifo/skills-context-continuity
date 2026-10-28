@@ -4,13 +4,18 @@ import type { On } from 'claude-code'
 
 const SNAP = '/home/u/.claude/context_snapshot_-work.md'
 
-function world($: Engine, on: On, opts: { percent?: number; snapshotWritten?: boolean; written?: string[]; configPercent?: string } = {}) {
+type WorldOpts = { percent?: number; snapshotWritten?: boolean; written?: string[]; configPercent?: string; env?: Record<string, string>; cwd?: string; noSender?: boolean }
+
+function world($: Engine, on: On, opts: WorldOpts = {}) {
   const clock = mock.clock(on, { now: 1000 })
-  mock.env(on, { HOME: '/home/u' })
+  mock.env(on, opts.env ?? { HOME: '/home/u' })
   const prompts: string[] = []
   const compactions: unknown[] = []
   const compactedTo: unknown[] = []
   const notifications: string[][] = []
+  const uiNotes: { text: string; title?: string }[] = []
+  const runs: string[][] = []
+  const listed: unknown[] = []
   let mtime = opts.snapshotWritten === false ? 0 : 5000
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: 'ok' }))
@@ -26,24 +31,31 @@ function world($: Engine, on: On, opts: { percent?: number; snapshotWritten?: bo
   })
   on('command.register', () => ({ value: {} }) as never)
   on('tool.register', () => ({ value: { tool: 'mcp__context-refresh__refresh' } }) as never)
-  on('session.cwd', () => ({ value: '/work' }) as never)
+  on('session.cwd', () => ({ value: opts.cwd ?? '/work' }) as never)
   on('session.id', () => ({ value: 'sess-1' }) as never)
-  on('session.root', () => ({ value: '/work' }) as never)
+  on('session.root', () => ({ value: opts.cwd ?? '/work' }) as never)
   on('process.run', (_$, e) => {
     const argv = (e as unknown as { argv: string[] }).argv
-    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } }) as never
-    if (argv[1] === '-c') return ok(opts.configPercent ?? '90')
-    if (argv[1]?.endsWith('ctx-notify-send.sh')) {
-      notifications.push(argv.slice(2))
+    runs.push(argv)
+    if (argv[1]?.endsWith('ctx-notify-send.sh')) notifications.push(argv.slice(2))
 
-      return ok('')
-    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('fs.exists', (_$, e) => {
+    const path = String((e as unknown as { path?: string }).path ?? JSON.stringify(e))
+    if (path.endsWith('ctx-notify-send.sh')) return { value: !opts.noSender } as never
 
-    return ok(`${SNAP}\n`)
+    return { value: path.endsWith('ctx-config.sh') && opts.configPercent !== undefined } as never
+  })
+  on('fs.read', () => ({ value: `CTX_HIGH_THRESHOLD=80\nCTX_AUTO_REFRESH_THRESHOLD=${opts.configPercent}\n` }) as never)
+  on('ui.notify', (_$, e) => {
+    uiNotes.push(e as unknown as { text: string; title?: string })
+
+    return { value: { isSent: true, channel: 'test' } } as never
   })
   // ~/.claude as the model left it: this run's snapshots (fresh), an old one, a sidecar.
   const written = opts.written ?? (opts.snapshotWritten === false ? [] : ['context_snapshot_-work.md'])
-  on('fs.list', () => ({ value: [
+  on('fs.list', (_$, e) => (listed.push(e), { value: [
     ...written.map(name => ({ name, kind: 'file', size: 10, mtimeMs: mtime, isLink: false })),
     { name: 'context_snapshot_-old.md', kind: 'file', size: 10, mtimeMs: 1, isLink: false },
     { name: 'context_snapshot_-work.git.txt', kind: 'file', size: 10, mtimeMs: 5000, isLink: false },
@@ -60,7 +72,7 @@ function world($: Engine, on: On, opts: { percent?: number; snapshotWritten?: bo
     return { messages: [{ role: 'user', text: 'core summary', toolUses: [] }] }
   })
 
-  return { clock, prompts, compactions, compactedTo, notifications, setMtime: (m: number) => (mtime = m) }
+  return { clock, prompts, compactions, compactedTo, notifications, uiNotes, runs, listed, setMtime: (m: number) => (mtime = m) }
 }
 
 const endTurn = ($: Engine, reason: 'answer' | 'aborted' = 'answer') =>
@@ -216,4 +228,49 @@ test('two fresh snapshots from other directories: refuses to guess', async ($, o
   await w.clock.advance(400)
   expect(w.compactedTo).toEqual([])
   expect(w.notifications[0]?.[2]).toContain('2 件')
+})
+
+const WINDOWS = { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' }
+
+test('Windows: no bash, the home is USERPROFILE and paths take the C:/ form the hooks use', async ($, on) => {
+  const w = world($, on, {
+    env: WINDOWS, cwd: 'C:\\Users\\u\\work', noSender: true,
+    written: ['context_snapshot_C--Users-u-work.md', 'context_snapshot_C--Users-u-other.md'],
+  })
+  await $.session.start({ source: 'startup', cwd: 'C:\\Users\\u\\work' } as never)
+  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
+  await endTurn($)
+  await w.clock.advance(400)
+  expect(w.compactedTo).toHaveLength(1)
+  expect(w.prompts[0]).toContain('C:/Users/u/.claude/context_snapshot_C--Users-u-work.md')
+  expect(JSON.stringify(w.listed)).toContain('C:/Users/u/.claude')
+  expect(w.runs).toEqual([])
+})
+
+test('Windows: a stop is notified through the engine, not a script', async ($, on) => {
+  const w = world($, on, { env: WINDOWS, cwd: 'C:\\Users\\u\\work', snapshotWritten: false })
+  await $.session.start({ source: 'startup', cwd: 'C:\\Users\\u\\work' } as never)
+  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
+  await endTurn($)
+  expect(w.uiNotes).toHaveLength(1)
+  expect(JSON.stringify(w.uiNotes[0])).toContain('❌ refresh 中止')
+  expect(w.runs).toEqual([])
+})
+
+test('a Japanese directory is named the way snapshot-path.sh names it (one dash per UTF-8 byte)', async ($, on) => {
+  const w = world($, on, { cwd: '/tmp/日本語 dir/a.b', written: ['context_snapshot_-tmp-----------dir-a-b.md', 'context_snapshot_-other.md'] })
+  await $.session.start({ source: 'startup', cwd: '/tmp/日本語 dir/a.b' } as never)
+  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
+  await endTurn($)
+  await w.clock.advance(400)
+  expect(w.prompts[0]).toContain('/home/u/.claude/context_snapshot_-tmp-----------dir-a-b.md')
+})
+
+test('no notification script on a Mac: falls back to the engine notification', async ($, on) => {
+  const w = world($, on, { snapshotWritten: false, noSender: true })
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
+  await endTurn($)
+  expect(w.notifications).toEqual([])
+  expect(w.uiNotes).toHaveLength(1)
 })

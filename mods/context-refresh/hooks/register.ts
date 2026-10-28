@@ -46,22 +46,47 @@ const restorePrompt = (path: string) =>
   'context-refresh で会話を空にしました（session_id は維持）。context-restore スキルの手順で作業を再開してください。' +
   `スナップショットが注入されていなければ ${path} を Read すること。`
 
-const home = async ($: EngineInterface) => (await $.env.get('HOME')) ?? ''
+const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
+
+// Windows paths arrive as C:\x or Git Bash's /c/x; the hooks name snapshots off C:/x, drive upper-cased.
+function toWindowsForm(path: string): string {
+  let p = path.replace(/\\/g, '/')
+  const msys = /^\/([a-zA-Z])(\/|$)/.exec(p)
+  if (msys) p = `${msys[1]}:/${p.slice(3)}`
+
+  return /^[a-z]:/.test(p) ? p[0]!.toUpperCase() + p.slice(1) : p
+}
+
+async function home($: EngineInterface): Promise<string> {
+  if (!(await isWindows($))) return (await $.env.get('HOME')) ?? ''
+
+  return toWindowsForm((await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '')
+}
+
+// Same name as hooks/snapshot-path.sh and .ps1: every UTF-8 byte outside [0-9A-Za-z] becomes '-'.
+function snapshotKey(dir: string): string {
+  let key = ''
+  for (const ch of dir) {
+    const cp = ch.codePointAt(0)!
+    key += /[0-9A-Za-z]/.test(ch) ? ch : '-'.repeat(cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4)
+  }
+
+  return key
+}
 
 async function readAutoPercent($: EngineInterface): Promise<number> {
-  const script = '. "$1/.claude/hooks/ctx-config.sh" 2>/dev/null; printf %s "${CTX_AUTO_REFRESH_THRESHOLD:-}"'
-  const { stdout } = await $.process.run(['bash', '-c', script, 'ctx-config', await home($)])
-  const n = Number.parseInt(stdout.trim(), 10)
+  const config = `${await home($)}/.claude/hooks/ctx-config.sh`
+  if (!(await $.fs.exists(config))) return DEFAULT_AUTO_PERCENT
+  const found = /^\s*CTX_AUTO_REFRESH_THRESHOLD=["']?(\d+)/m.exec(await $.fs.read(config))
+  const n = Number.parseInt(found?.[1] ?? '', 10)
 
   return Number.isFinite(n) && n > 0 && n <= 100 ? n : DEFAULT_AUTO_PERCENT
 }
 
 async function resolveSnapshotPath($: EngineInterface, dir?: string): Promise<string> {
-  const cwd = dir ?? (await $.session.cwd())
-  const { exitCode, stdout } = await $.process.run(['bash', `${await home($)}/.claude/hooks/snapshot-path.sh`, cwd])
-  if (exitCode !== 0 || stdout.trim() === '') throw new Error('snapshot-path.sh failed')
+  const raw = dir ?? (await $.session.cwd())
 
-  return stdout.trim()
+  return `${await home($)}/.claude/context_snapshot_${snapshotKey((await isWindows($)) ? toWindowsForm(raw) : raw)}.md`
 }
 
 // The model's shell may cd before it writes, so look for what this run wrote instead of predicting the name.
@@ -83,9 +108,20 @@ async function findSnapshot($: EngineInterface): Promise<{ path: string } | { fa
 async function notify($: EngineInterface, title: string, body: string, isAlways = false) {
   if (autoAt === undefined && !isAlways) return
   const h = await home($)
-  const cwd = await $.session.cwd()
+  const isWin = await isWindows($)
+  const cwd = isWin ? toWindowsForm(await $.session.cwd()) : await $.session.cwd()
   const dir = cwd === h ? '~' : cwd.startsWith(`${h}/`) ? `~${cwd.slice(h.length)}` : cwd
-  await $.process.run(['bash', `${h}/.claude/hooks/ctx-notify-send.sh`, `Claude Code — ${title}`, dir, body])
+  const sender = `${h}/.claude/hooks/ctx-notify-send.sh`
+  try {
+    if (!isWin && (await $.fs.exists(sender))) {
+      const { exitCode } = await $.process.run(['bash', sender, `Claude Code — ${title}`, dir, body])
+      if (exitCode === 0) return
+    }
+    // No sender script (Windows, or a machine set up from the README alone): the engine's own notification.
+    await $.ui.notify(`${dir}: ${body}`, { title: `Claude Code — ${title}` })
+  } catch {
+    // A notification that fails must not stop the refresh.
+  }
 }
 
 async function finish($: EngineInterface, outcome: { failed: string } | 'restored') {
