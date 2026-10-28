@@ -8,11 +8,12 @@
 
 > Context snapshot, clear, and restore — seamless session continuity for Claude Code
 
-Two [Claude Code](https://claude.ai/code) skills plus the hooks that make them automatic:
+[Claude Code](https://claude.ai/code) skills, the hooks that make them automatic, and an optional mod:
 
 - **`context-snapshot-clear`** — when context usage grows too large, snapshots the complete session state (goals in the user's own words, decisions, in-progress code, errors verbatim, executable next actions), then `/clear`s. Git state (`git status` / `diff` / `diff --cached`) is dumped verbatim to a `.git.txt` sidecar by shell redirection — the model never re-emits what already exists on disk, which keeps snapshotting fast.
 - **`context-restore`** — after `/clear` (or a fresh session in the same directory), reads the snapshot back, reports the restored goal, resumes work, and deletes the snapshot + sidecar.
 - **`hooks/`** — `snapshot-path.sh` (single source of truth for the snapshot path) and `restore-context.sh` (a `UserPromptSubmit` hook that auto-injects a fresh snapshot into context, so restoration needs zero manual steps), plus their PowerShell twins `snapshot-path.ps1` / `restore-context.ps1` for native Windows.
+- **`context-snapshot-refresh`** + **`mods/context-refresh`** (experimental) — `/context-refresh`: the same snapshot, but instead of `/clear` a mod empties the conversation in place, so the session id stays and `/resume` keeps one session. The mod then starts `context-restore` by itself, and also runs the whole thing automatically when a turn ends at 90% context or more. See [/context-refresh](#context-refresh-keep-the-session-id).
 
 #### Why cwd-keyed paths
 
@@ -57,6 +58,39 @@ context is at 75%, snapshot and clear        # or let your own trigger rule invo
 
 After `/clear`, just send any prompt — the hook injects the snapshot automatically and `context-restore` resumes from "next actions".
 
+#### /context-refresh (keep the session id)
+
+Experimental: covered by the mod's tests (`claude plugin test mods/context-refresh`), not yet proven over long real sessions.
+
+`/clear` starts a new session, so the conversation before it ends up in a different `/resume` entry. `/context-refresh` keeps the same session and still ends with an almost empty context:
+
+1. The mod submits a prompt that runs `context-snapshot-refresh`. It writes the same snapshot and `.git.txt` as `context-snapshot-clear`, then just ends the turn.
+2. When the turn ends, the mod checks that the snapshot was written during this run (by its modification time).
+3. The mod runs `/compact` and answers that compaction itself with one marker line, so no summary is made. One line is the minimum: the engine refuses a compaction that leaves no message.
+4. The mod submits a prompt that starts `context-restore`. `restore-context.sh` injects the snapshot as usual.
+
+You can also just ask for it in plain words (「コンテキストリフレッシュして」, "refresh the context"). The mod registers a tool, `mcp__context-refresh__refresh`, that Claude calls first; Claude then writes the snapshot in the same turn and the mod does the rest. It also starts by itself when a turn ends normally with the context at 90% or more.
+
+Install (needs `bash`, so macOS, Linux or WSL; the mod does not run on native Windows):
+
+```bash
+cp -r /tmp/skills-context-continuity/context-snapshot-refresh ~/.claude/skills/
+mkdir -p ~/.claude/mods && cp -r /tmp/skills-context-continuity/mods/context-refresh ~/.claude/mods/
+```
+
+Then add the mod folder to `~/.claude/settings.json` and start a new session:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
+```
+
+The setting is read when a session's process starts, so a session that was already running before you installed the mod (a long-lived desktop app session, for example) does not have it. Open a new session. `claude plugin list` shows `context-refresh@inline ... ✔ loaded` when the setting is picked up.
+
+Optional, read from `~/.claude/hooks/` if present (not bundled):
+
+- `ctx-config.sh` setting `CTX_AUTO_REFRESH_THRESHOLD` changes the 90% trigger.
+- `ctx-notify-send.sh "<title>" "<subtitle>" "<body>"` sends a desktop notification when an automatic run starts, finishes or stops. Without it you only get in-terminal toasts.
+
 #### Tuning knobs (defaults are deliberate — change them here if you want different behavior)
 
 | Behavior | Default | Where to change |
@@ -64,6 +98,7 @@ After `/clear`, just send any prompt — the hook injects the snapshot automatic
 | Snapshot freshness window | 60 min (older snapshots are not auto-injected; `Read` them manually) | `hooks/restore-context.sh` → `is_fresh()` (`-mmin -60`); `hooks/restore-context.ps1` → `AddMinutes(-60)` |
 | Descendant search depth | 3 levels | `hooks/restore-context.sh` → `find ... -maxdepth 3`; `hooks/restore-context.ps1` → `$depth -le 3` |
 | Two sessions clearing in the same directory | last writer wins (documented trade-off: after `/clear` the directory is the only stable handle) | by design; use distinct working directories if this bites |
+| Automatic `/context-refresh` | when a turn ends at 90% context or more | `CTX_AUTO_REFRESH_THRESHOLD` in `~/.claude/hooks/ctx-config.sh`; fallback `DEFAULT_AUTO_PERCENT` in `mods/context-refresh/hooks/register.ts` |
 
 ---
 
@@ -73,11 +108,12 @@ After `/clear`, just send any prompt — the hook injects the snapshot automatic
 
 > コンテキストのスナップショット保存・クリア・復元 — Claude Code のセッション継続をシームレスに
 
-2つのスキルと、それを自動化するフックのセットです：
+スキルと、それを自動化するフック、追加の mod のセットです：
 
 - **`context-snapshot-clear`** — コンテキスト使用率が高くなったら、セッション状態の完全なスナップショット（ユーザーの言葉のままのゴール・決定事項・書きかけコード・エラー verbatim・実行可能な次アクション）を保存して `/clear`。git の状態（`status` / `diff` / `diff --cached`）はシェルのリダイレクトで `.git.txt` サイドカーへ全量退避 — ディスク上に既にあるものをモデルが再出力しないため、スナップショット作成が高速です。
 - **`context-restore`** — `/clear` 後（または同じディレクトリでの新セッション）にスナップショットを読み戻し、ゴールを報告して作業を再開し、スナップショットとサイドカーを削除します。
 - **`hooks/`** — `snapshot-path.sh`（スナップショットパスの単一情報源）と `restore-context.sh`（`UserPromptSubmit` フック。新鮮なスナップショットを自動注入するので、復元に手作業ゼロ）。Windows 用に PowerShell 版の `snapshot-path.ps1` / `restore-context.ps1` もあります。
+- **`context-snapshot-refresh`** ＋ **`mods/context-refresh`**（試験的）— `/context-refresh`：同じスナップショットを取ったうえで、`/clear` の代わりに mod が会話をその場で空にします。session id が変わらないので、`/resume` でも1つのセッションのままです。そのあと mod が `context-restore` を自動で起動します。ターン終了時にコンテキストが 90% 以上なら、この一連の流れを自動で実行します。詳しくは [/context-refresh](#context-refreshsession-id-を維持) を参照。
 
 #### なぜ cwd キーなのか
 
@@ -122,6 +158,39 @@ Copy-Item -Force "$src\hooks\*.ps1", "$src\hooks\*.sh" "$env:USERPROFILE\.claude
 
 `/clear` 後は何かプロンプトを送るだけ — フックがスナップショットを自動注入し、`context-restore` が「次のアクション」から再開します。
 
+#### /context-refresh（session id を維持）
+
+試験的な機能です。mod のテスト（`claude plugin test mods/context-refresh`）は通っていますが、実際の長いセッションでの実績はまだありません。
+
+`/clear` は新しいセッションを始めるので、それ以前の会話は `/resume` で別の項目になります。`/context-refresh` は同じセッションのまま、コンテキストをほぼ空にします：
+
+1. mod がプロンプトを送り、`context-snapshot-refresh` を起動します。`context-snapshot-clear` と同じスナップショットと `.git.txt` を書き、そのままターンを終えます。
+2. ターンが終わると、mod はスナップショットが今回書かれたものかを更新時刻で確認します。
+3. mod が `/compact` を起動し、その compact に自分で答えて会話をマーカー1行だけにします。要約は作りません。1行残すのは、メッセージが0件になる compact をエンジンが受け付けないためです。
+4. mod が `context-restore` を起動するプロンプトを送ります。スナップショットはいつもどおり `restore-context.sh` が注入します。
+
+普通の言葉で頼むこともできます（「コンテキストリフレッシュして」など）。mod が `mcp__context-refresh__refresh` というツールを登録しており、Claude はまずそれを呼び、同じターンでスナップショットを書きます。残りは mod が進めます。ターンが普通に終わった時点でコンテキストが 90% 以上なら、自動で始まります。
+
+インストール（`bash` が必要なので macOS・Linux・WSL 向け。ネイティブ Windows では mod は動きません）：
+
+```bash
+cp -r /tmp/skills-context-continuity/context-snapshot-refresh ~/.claude/skills/
+mkdir -p ~/.claude/mods && cp -r /tmp/skills-context-continuity/mods/context-refresh ~/.claude/mods/
+```
+
+続けて `~/.claude/settings.json` に mod のフォルダを追加し、新しいセッションを始めます：
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
+```
+
+この設定はセッションのプロセスが起動するときに読まれます。mod を入れる前から動いているセッション（長く開いたままのデスクトップアプリのセッションなど）には入らないので、新しいセッションを開いてください。設定が読まれていれば、`claude plugin list` に `context-refresh@inline ... ✔ loaded` と出ます。
+
+次のファイルが `~/.claude/hooks/` にあれば使います（同梱していません）：
+
+- `ctx-config.sh` の `CTX_AUTO_REFRESH_THRESHOLD` で、自動起動の 90% を変えられます。
+- `ctx-notify-send.sh "<タイトル>" "<サブタイトル>" "<本文>"` があれば、自動実行の開始・完了・中止をデスクトップ通知します。無ければターミナル内のトーストだけです。
+
 #### 調整ポイント（デフォルトは意図的な設計です — 変えたい場合はここ）
 
 | 挙動 | デフォルト | 変更箇所 |
@@ -129,3 +198,4 @@ Copy-Item -Force "$src\hooks\*.ps1", "$src\hooks\*.sh" "$env:USERPROFILE\.claude
 | スナップショットの鮮度ウィンドウ | 60分（それより古いと自動注入されない。手動 `Read` は可能） | `hooks/restore-context.sh` → `is_fresh()`（`-mmin -60`）／`hooks/restore-context.ps1` → `AddMinutes(-60)` |
 | 子ディレクトリ探索の深さ | 3階層 | `hooks/restore-context.sh` → `find ... -maxdepth 3`／`hooks/restore-context.ps1` → `$depth -le 3` |
 | 同一ディレクトリで2セッションが clear した場合 | 後勝ち（`/clear` 後はディレクトリが唯一の安定ハンドル、という設計上のトレードオフ） | 仕様。困る場合は作業ディレクトリを分ける |
+| `/context-refresh` の自動起動 | ターン終了時にコンテキスト 90% 以上 | `~/.claude/hooks/ctx-config.sh` の `CTX_AUTO_REFRESH_THRESHOLD`。無い場合は `mods/context-refresh/hooks/register.ts` の `DEFAULT_AUTO_PERCENT` |
