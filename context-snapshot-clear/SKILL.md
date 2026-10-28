@@ -37,6 +37,8 @@ $SNAP
 
 Phase 1 で得たパスに Write ツールで書き込む。**該当する内容がないセクションは「なし」の1行だけにする**（空テンプレの複写は禁止）。**diff や保存済みコードは貼らない**（.git.txt を参照）：
 
+`Context at Save` は、ステータスラインやシステムの表示で確認できた値だけを書く。推測しない（実際は 81% なのに「約12%」と書いた例がある）。分からなければ「不明」。
+
 ````markdown
 # Claude Context Snapshot
 Created: YYYY-MM-DDTHH:MM:SS+09:00

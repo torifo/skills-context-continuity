@@ -67,6 +67,7 @@ test('/context-refresh: snapshot -> compact to nothing -> restore prompt', async
   expect(text).toContain('context-refresh 開始')
   await w.clock.advance(1)
   expect(w.prompts[0]).toContain('context-snapshot-refresh')
+  expect(w.prompts[0]).toContain('Context at Save には 10% と書くこと')
 
   await endTurn($)
   await w.clock.advance(400)
@@ -113,6 +114,7 @@ test('auto at >= 90%: runs the whole refresh and notifies start and completion',
   await endTurn($)
   await w.clock.advance(1)
   expect(w.prompts[0]).toContain('context-snapshot-refresh')
+  expect(w.prompts[0]).toContain('Context at Save には 92% と書くこと')
   expect(w.notifications).toEqual([['Claude Code — 🔄 自動 refresh 開始（92%）', '/work', 'snapshot → 会話リセット → 復元']])
 
   await endTurn($)
@@ -161,6 +163,7 @@ test('natural language: the model calls the tool, writes the snapshot in that tu
   await $.session.start({ source: 'startup', cwd: '/work' } as never)
   const called = await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
   expect(JSON.stringify(called)).toContain('context-snapshot-refresh')
+  expect(JSON.stringify(called)).toContain('Context at Save には 10% と書くこと')
   await w.clock.advance(1)
   expect(w.prompts).toHaveLength(0)
 

@@ -11,6 +11,7 @@ type Phase = 'idle' | 'snapshotting' | 'compacting' | 'restoring'
 
 let phase: Phase = 'idle'
 let startedAt = 0
+let percentAtStart: number | undefined
 let snapshotPath = ''
 let didReset = false
 let isSessionKept = true
@@ -21,8 +22,13 @@ let autoAt: number | undefined
 const COMPACT_ARGS = 'context-refresh: reset'
 const RESET_MARK = '（context-refresh: 会話をリセットしました）'
 
-const SNAPSHOT_PROMPT =
+// The model cannot see its own context fill and guesses badly, so the snapshot gets the engine's figure.
+const savedAt = () =>
+  percentAtStart === undefined ? 'Context at Save は「不明」と書くこと。' : `Context at Save には ${percentAtStart}% と書くこと（推測しない）。`
+
+const snapshotPrompt = () =>
   'context-snapshot-refresh スキルを起動し、その手順でスナップショットを作成してください。' +
+  savedAt() +
   '書き終えたら「スナップショット作成完了」とだけ返してターンを終えること（/clear・/compact は不要。続きは context-refresh mod が自動で行う）。'
 
 const TOOL_DESCRIPTION =
@@ -30,9 +36,10 @@ const TOOL_DESCRIPTION =
   'Call this when the user asks to refresh the context (e.g. 「コンテキストリフレッシュして」「リフレッシュして」「context refresh」). ' +
   'Call it first, then follow its result. Never run /clear or /compact for this.'
 
-const TOOL_RESULT =
+const toolResult = () =>
   '受け付けました。このターンのうちに context-snapshot-refresh スキルでスナップショットを書き、「スナップショット作成完了」とだけ返してターンを終えてください。' +
-  'ターン終了後に context-refresh mod が会話を空にし（session_id 維持）、context-restore を自動で始めます。'
+  'ターン終了後に context-refresh mod が会話を空にし（session_id 維持）、context-restore を自動で始めます。' +
+  savedAt()
 
 const restorePrompt = (path: string) =>
   'context-refresh で会話を空にしました（session_id は維持）。context-restore スキルの手順で作業を再開してください。' +
@@ -89,6 +96,7 @@ async function finish($: EngineInterface, outcome: { failed: string } | 'restore
 async function arm($: EngineInterface, percent?: number) {
   snapshotPath = await resolveSnapshotPath($)
   startedAt = await $.clock.now()
+  percentAtStart = (await $.session.usage()).context.percent
   autoAt = percent
   phase = 'snapshotting'
   $.ui.status('refresh: snapshot…')
@@ -98,7 +106,7 @@ async function start($: EngineInterface, percent?: number): Promise<string> {
   if (phase !== 'idle') return `context-refresh は実行中です（${phase}）`
   await arm($, percent)
   // A command.run hook may not submit (it would wait on its own turn): defer to a timer.
-  $.clock.after(0, () => void $.prompt.submit({ text: SNAPSHOT_PROMPT }))
+  $.clock.after(0, () => void $.prompt.submit({ text: snapshotPrompt() }))
   await notify($, `🔄 自動 refresh 開始（${percent}%）`, 'snapshot → 会話リセット → 復元')
 
   return `context-refresh 開始（${percent === undefined ? '手動' : `自動 ${percent}%`}）: snapshot → 会話を0に → restore`
@@ -153,7 +161,7 @@ export const register: Register = on => {
     if (phase !== 'idle') return { result: `context-refresh は実行中です（${phase}）。何もせずターンを終えてください。` }
     await arm($)
 
-    return { result: TOOL_RESULT }
+    return { result: toolResult() }
   }).catch(() => {
     phase = 'idle'
 
