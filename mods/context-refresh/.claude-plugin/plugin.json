@@ -1,0 +1,1 @@
+{ "name": "context-refresh", "version": "0.1.0", "description": "/context-refresh: snapshot -> empty the conversation (same session_id) -> context-restore; auto at 90% when a turn ends" }
