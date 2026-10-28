@@ -13,6 +13,7 @@ let phase: Phase = 'idle'
 let startedAt = 0
 let percentAtStart: number | undefined
 let snapshotPath = ''
+let armedPath = ''
 let didReset = false
 let isSessionKept = true
 let autoPercent = DEFAULT_AUTO_PERCENT
@@ -55,24 +56,32 @@ async function readAutoPercent($: EngineInterface): Promise<number> {
   return Number.isFinite(n) && n > 0 && n <= 100 ? n : DEFAULT_AUTO_PERCENT
 }
 
-async function resolveSnapshotPath($: EngineInterface): Promise<string> {
-  const cwd = await $.session.cwd()
+async function resolveSnapshotPath($: EngineInterface, dir?: string): Promise<string> {
+  const cwd = dir ?? (await $.session.cwd())
   const { exitCode, stdout } = await $.process.run(['bash', `${await home($)}/.claude/hooks/snapshot-path.sh`, cwd])
   if (exitCode !== 0 || stdout.trim() === '') throw new Error('snapshot-path.sh failed')
 
   return stdout.trim()
 }
 
-async function isFreshSnapshot($: EngineInterface): Promise<boolean> {
-  if (!(await $.fs.exists(snapshotPath))) return false
-  const { kind, mtimeMs } = await $.fs.stat(snapshotPath)
+// The model's shell may cd before it writes, so look for what this run wrote instead of predicting the name.
+async function findSnapshot($: EngineInterface): Promise<{ path: string } | { failed: string }> {
+  const dir = `${await home($)}/.claude`
+  const fresh = (await $.fs.list(dir))
+    .filter(f => f.kind === 'file' && /^context_snapshot_.+\.md$/.test(f.name) && f.mtimeMs >= startedAt)
+    .map(f => `${dir}/${f.name}`)
+  if (fresh.length === 0) return { failed: `今回のスナップショットが見つかりません（${dir}/context_snapshot_*.md）` }
+  if (fresh.length === 1) return { path: fresh[0]! }
+  const preferred = [await resolveSnapshotPath($), await resolveSnapshotPath($, await $.session.root()), armedPath]
+  const path = preferred.find(p => fresh.includes(p))
 
-  return kind === 'file' && mtimeMs >= startedAt
+  return path === undefined ? { failed: `今回書かれたスナップショットが ${fresh.length} 件あり、どれか決められません` } : { path }
 }
 
 // Same format and sound as ctx-notify.sh, through its shared sender.
-async function notify($: EngineInterface, title: string, body: string) {
-  if (autoAt === undefined) return
+// Start and finish are notified for automatic runs only; a stop always is, since a toast is invisible in the desktop app.
+async function notify($: EngineInterface, title: string, body: string, isAlways = false) {
+  if (autoAt === undefined && !isAlways) return
   const h = await home($)
   const cwd = await $.session.cwd()
   const dir = cwd === h ? '~' : cwd.startsWith(`${h}/`) ? `~${cwd.slice(h.length)}` : cwd
@@ -87,14 +96,15 @@ async function finish($: EngineInterface, outcome: { failed: string } | 'restore
     await notify($, '✅ refresh 完了', isSessionKept ? '作業を再開しました（session_id 維持）' : '作業を再開しました（session_id が変化）')
   } else {
     $.ui.toast(`context-refresh: ${outcome.failed}`)
-    await notify($, '❌ refresh 中止', outcome.failed)
+    await notify($, '❌ refresh 中止', outcome.failed, true)
   }
   autoAt = undefined
 }
 
 // Snapshotting begins now; the turn that writes the snapshot is either this one (tool) or a submitted one.
 async function arm($: EngineInterface, percent?: number) {
-  snapshotPath = await resolveSnapshotPath($)
+  armedPath = await resolveSnapshotPath($)
+  snapshotPath = ''
   startedAt = await $.clock.now()
   percentAtStart = (await $.session.usage()).context.percent
   autoAt = percent
@@ -182,11 +192,15 @@ export const register: Register = on => {
 
     if (phase === 'snapshotting') {
       if (e.reason !== 'answer') await finish($, { failed: 'スナップショット作成が中断されました' })
-      else if (!(await isFreshSnapshot($))) await finish($, { failed: `スナップショットが書かれていません: ${snapshotPath}` })
       else {
-        phase = 'compacting'
-        $.ui.status('refresh: 会話を空に…')
-        emptyConversation($)
+        const found = await findSnapshot($)
+        if ('failed' in found) await finish($, found)
+        else {
+          snapshotPath = found.path
+          phase = 'compacting'
+          $.ui.status('refresh: 会話を空に…')
+          emptyConversation($)
+        }
       }
     } else if (phase === 'restoring') {
       await finish($, 'restored')
