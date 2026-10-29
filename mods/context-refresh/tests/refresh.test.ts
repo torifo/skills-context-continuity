@@ -385,6 +385,7 @@ test('the snapshot gets an appendix: the transcript, the person\'s words, edited
       { tool_use_id: '2', tool: 'Edit', input: { file_path: '/work/a.md', old_string: 'x', new_string: 'y' } },
       { tool_use_id: '3', tool: 'NotebookEdit', input: { notebook_path: '/work/n.ipynb' } },
       { tool_use_id: '4', tool: 'Write', input: { file_path: SNAP, content: 'snap' } },
+      { tool_use_id: '5', tool: 'Bash', input: { command: "sed -i '' s/x/y/ /work/b.md" } },
     ] },
     { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: '1', text: 'ok' }] },
     { role: 'user', text: '<command-name>/auto-mode-setup</command-name>\n<command-message>auto-mode-setup</command-message>\n<command-args></command-args>', toolUses: [] },
@@ -407,8 +408,10 @@ test('the snapshot gets an appendix: the transcript, the person\'s words, edited
   expect(snap).toContain('4. コンテキストリフレッシュして')
   expect(snap).toContain('- /work/a.md（2 回）')
   expect(snap).toContain('- /work/n.ipynb（1 回）')
+  // Files a shell command wrote are not listed, and the appendix says where to look for them.
+  expect(snap).toContain('Bash やスクリプトで書き換えたファイルはここに出ない')
   expect(snap).toContain('- https://claude.ai/artifact/Gf5nu\n')
-  for (const noise of ['前回のリフレッシュより前', 'mod からの依頼', 'context-refresh: reset', 'Base directory', 'Re-invocation', 'system-reminder', `- ${SNAP}`]) {
+  for (const noise of ['前回のリフレッシュより前', 'mod からの依頼', 'context-refresh: reset', 'Base directory', 'Re-invocation', 'system-reminder', `- ${SNAP}`, '/work/b.md']) {
     expect(snap).not.toContain(noise)
   }
 

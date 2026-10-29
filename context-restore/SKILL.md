@@ -45,7 +45,7 @@ When you see these markers, immediately follow the procedure below.
 
 The snapshot is written by judgement and can leave things out (a URL, a draft's exact wording, an earlier detail). Before asking the user, look in this order:
 
-1. **The appendix** at the end of the snapshot (`## 付録：会話記録からの自動抽出`, added by the context-refresh mod): the user's words verbatim, edited files, URLs seen in the conversation, and the transcript path.
+1. **The appendix** at the end of the snapshot (`## 付録：会話記録からの自動抽出`, added by the context-refresh mod): the user's words verbatim, edited files, URLs seen in the conversation, and the transcript path. Edited files are only those written with Edit / Write / NotebookEdit; for a file changed by a shell command, search the transcript's Bash commands (`input.command`).
 2. **The transcript** named there and in the mod's restore prompt. A refresh empties the conversation but the session's `.jsonl` keeps all of it; the part before the last `compact_boundary` is what was emptied. After `/clear` the old conversation is in the previous session's file instead: `ls -t ~/.claude/projects/<cwd key>/*.jsonl | head -3`.
    ```bash
    T=<transcript path>

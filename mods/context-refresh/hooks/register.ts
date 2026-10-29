@@ -220,6 +220,7 @@ async function buildAppendix($: EngineInterface): Promise<{ text: string; counts
     list(kept.map((w, i) => `${i + 1}. ${clip(w).replace(/\n/g, '\n   ')}`)),
     '',
     '### 編集したファイル（Edit / Write / NotebookEdit）',
+    'Bash やスクリプトで書き換えたファイルはここに出ない。漏れは記録ファイルの Bash コマンド（tool_use の input.command）を検索する。',
     list([...edits].map(([path, n]) => `- ${path}（${n} 回）`)),
     '',
     '### 会話に出た URL（ユーザーの発言と Claude の返答から）',
