@@ -87,11 +87,13 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\mods" | Out-Null
 Copy-Item -Recurse -Force "$src\mods\context-refresh" "$env:USERPROFILE\.claude\mods\"
 ```
 
-Then add the mod folder to `~/.claude/settings.json` and start a new session:
+Then add the mod folder to `~/.claude/settings.json`, turn off automatic compaction, and start a new session:
 
 ```json
-{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh", "DISABLE_AUTO_COMPACT": "1" } }
 ```
+
+`DISABLE_AUTO_COMPACT` turns off only Claude Code's automatic compaction. Recent versions (seen in 2.1.309) prepare the summary in the background and swap it in at around 73–79% of a 1M window, so the conversation is summarized before the mod's 90% is reached and the refresh never runs. Do not use `DISABLE_COMPACT` instead: it also switches off `/compact` and the compaction the mod uses to empty the conversation. With automatic compaction off, nothing steps in if a single turn takes the context from 90% past the limit; run `/compact` by hand if that happens.
 
 The setting is read when a session's process starts, so a session that was already running before you installed the mod (a long-lived desktop app session, for example) does not have it. Restart that process and reopen the session: quit the desktop app with ⌘Q and open the session again, or in a terminal exit and run `claude --resume <session id>`. The session id stays the same and the mod is loaded. `claude plugin list` shows `context-refresh@inline ... ✔ loaded` when the setting is picked up.
 
@@ -200,11 +202,13 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\mods" | Out-Null
 Copy-Item -Recurse -Force "$src\mods\context-refresh" "$env:USERPROFILE\.claude\mods\"
 ```
 
-続けて `~/.claude/settings.json` に mod のフォルダを追加し、新しいセッションを始めます：
+続けて `~/.claude/settings.json` に mod のフォルダと、自動 compact を止める設定を追加し、新しいセッションを始めます：
 
 ```json
-{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh" } }
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/context-refresh", "DISABLE_AUTO_COMPACT": "1" } }
 ```
+
+`DISABLE_AUTO_COMPACT` は Claude Code の自動 compact だけを止めます。最近のバージョン（2.1.309 で確認）は要約を裏で先に作っておき、1M のうち 73〜79% ほどで会話を差し替えます。これを止めないと、mod の 90% に届く前に会話が要約に置き換わり、リフレッシュが動きません。`DISABLE_COMPACT` は使わないでください。手動の `/compact` と、mod が会話を空にするのに使う compact まで止まります。自動 compact を止めると、1つのターンで 90% から上限を超えたときに止める仕組みがなくなります。そのときは手動で `/compact` してください。
 
 この設定はセッションのプロセスが起動するときに読まれます。mod を入れる前から動いているセッション（長く開いたままのデスクトップアプリのセッションなど）には入りません。プロセスを起動し直してセッションを開き直してください。デスクトップアプリなら ⌘Q で終了してそのセッションを開き直し、ターミナルなら終了して `claude --resume <session id>` を実行します。session id はそのままで、mod が入ります。設定が読まれていれば、`claude plugin list` に `context-refresh@inline ... ✔ loaded` と出ます。
 
