@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const SNAP = '/home/u/.claude/context_snapshot_-work.md'
+const RESET = [{ role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] }]
 
 type WorldOpts = { percent?: number; snapshotWritten?: boolean; written?: string[]; configPercent?: string; env?: Record<string, string>; cwd?: string; noSender?: boolean }
 
@@ -16,8 +17,11 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
   const uiNotes: { text: string; title?: string }[] = []
   const runs: string[][] = []
   const listed: unknown[] = []
+  const logs: { path: string; text: string }[] = []
   let mtime = opts.snapshotWritten === false ? 0 : 5000
+  let percent = opts.percent ?? 10
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: 'ok' }))
   on('ui.status', () => ({ value: undefined }) as never)
   on('ui.toast', () => ({ value: undefined }) as never)
@@ -32,7 +36,7 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
   on('command.register', () => ({ value: {} }) as never)
   on('tool.register', () => ({ value: { tool: 'mcp__context-refresh__refresh' } }) as never)
   on('session.cwd', () => ({ value: opts.cwd ?? '/work' }) as never)
-  on('session.id', () => ({ value: 'sess-1' }) as never)
+  on('session.id', () => ({ value: 'sess-1-abcdef' }) as never)
   on('session.root', () => ({ value: opts.cwd ?? '/work' }) as never)
   on('process.run', (_$, e) => {
     const argv = (e as unknown as { argv: string[] }).argv
@@ -48,6 +52,11 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
     return { value: path.endsWith('ctx-config.sh') && opts.configPercent !== undefined } as never
   })
   on('fs.read', () => ({ value: `CTX_HIGH_THRESHOLD=80\nCTX_AUTO_REFRESH_THRESHOLD=${opts.configPercent}\n` }) as never)
+  on('fs.write', (_$, e) => {
+    logs.push(e as unknown as { path: string; text: string })
+
+    return { value: undefined } as never
+  })
   on('ui.notify', (_$, e) => {
     uiNotes.push(e as unknown as { text: string; title?: string })
 
@@ -60,7 +69,7 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
     { name: 'context_snapshot_-old.md', kind: 'file', size: 10, mtimeMs: 1, isLink: false },
     { name: 'context_snapshot_-work.git.txt', kind: 'file', size: 10, mtimeMs: 5000, isLink: false },
   ] }) as never)
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000, percent: opts.percent ?? 10 }, rateLimits: [] } }) as never)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: percent * 10, window: 1000, percent }, rateLimits: [] } }) as never)
   on('prompt.submit', (_$, e) => {
     prompts.push(e.text)
 
@@ -72,159 +81,214 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
     return { messages: [{ role: 'user', text: 'core summary', toolUses: [] }] }
   })
 
-  return { clock, prompts, compactions, compactedTo, notifications, uiNotes, runs, listed, setMtime: (m: number) => (mtime = m) }
+  return {
+    clock, prompts, compactions, compactedTo, notifications, uiNotes, runs, listed, logs,
+    setMtime: (m: number) => (mtime = m), setPercent: (p: number) => (percent = p),
+  }
 }
 
-const endTurn = ($: Engine, reason: 'answer' | 'aborted' = 'answer') =>
-  $.turn.complete({ reason, answer: 'ok', durationMs: 1, isAborted: reason === 'aborted', turnId: 't' } as never)
+let turnSeq = 0
+async function startTurn($: Engine, text = '作業の続き'): Promise<string> {
+  const turnId = `t${++turnSeq}`
+  await $.turn.start({ text, turnId } as never)
 
-test('/context-refresh: snapshot -> compact to nothing -> restore prompt', async ($, on) => {
+  return turnId
+}
+const endTurn = ($: Engine, turnId: string, reason: 'answer' | 'aborted' = 'answer') =>
+  $.turn.complete({ reason, answer: 'ok', durationMs: 1, isAborted: reason === 'aborted', turnId } as never)
+const callTool = ($: Engine) => $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
+// A turn in which the model answers the request by calling the tool (and, in the test world, the snapshot exists).
+async function toolTurn($: Engine, text: string) {
+  const turnId = await startTurn($, text)
+  const result = await callTool($)
+  await endTurn($, turnId)
+
+  return JSON.stringify(result)
+}
+async function workTurn($: Engine, text = '作業の続き') {
+  await endTurn($, await startTurn($, text))
+}
+async function restoreTurn($: Engine, prompt: string) {
+  await endTurn($, await startTurn($, prompt))
+}
+const boot = ($: Engine, cwd = '/work') => $.session.start({ source: 'startup', cwd } as never)
+
+test('/context-refresh: asks for a tool turn, then snapshot -> compact to one line -> restore', async ($, on) => {
   const w = world($, on)
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await boot($)
   const { text } = await $.command.run({ command: 'context-refresh' } as never)
   expect(text).toContain('context-refresh 開始')
   await w.clock.advance(1)
-  expect(w.prompts[0]).toContain('context-snapshot-refresh')
-  expect(w.prompts[0]).toContain('Context at Save には 10% と書くこと')
+  expect(w.prompts[0]).toContain('mcp__context-refresh__refresh')
 
-  await endTurn($)
+  const result = await toolTurn($, w.prompts[0]!)
+  expect(result).toContain('context-snapshot-refresh')
+  expect(result).toContain('Context at Save には 10% と書くこと')
   await w.clock.advance(400)
-  expect(w.prompts).toHaveLength(2)
+  expect(w.compactions).toHaveLength(0)
+  expect(w.compactedTo).toEqual([RESET])
   expect(w.prompts[1]).toContain('context-restore')
   expect(w.prompts[1]).toContain(SNAP)
-  expect(w.compactions).toHaveLength(0)
-  expect(w.compactedTo).toEqual([[{ role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] }]])
 
-  await endTurn($)
+  await restoreTurn($, w.prompts[1]!)
   const again = await $.command.run({ command: 'context-refresh' } as never)
   expect(again.text).toContain('開始')
   expect(w.notifications).toEqual([])
 })
 
-test('compaction during refresh keeps no messages; other compactions untouched', async ($, on) => {
-  const w = world($, on)
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+test('compaction during refresh keeps one line; other compactions untouched', async ($, on) => {
+  world($, on)
+  await boot($)
   const normal = await $.session.compact({ trigger: 'manual', messages: [] } as never)
   expect(normal.messages).toHaveLength(1)
 
-  await $.command.run({ command: 'context-refresh' } as never)
-  await endTurn($)
+  await toolTurn($, 'コンテキストリフレッシュして')
   const plugin = await $.session.compact({ trigger: 'manual', instructions: 'context-refresh: reset', messages: [] } as never)
-  expect(plugin.messages).toEqual([{ role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] }])
-  void w
+  expect(plugin.messages).toEqual(RESET)
 })
 
-test('no fresh snapshot: aborts without compacting', async ($, on) => {
+test('no fresh snapshot when the snapshot turn ends: stops without compacting, and notifies even a manual run', async ($, on) => {
   const w = world($, on, { snapshotWritten: false })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.command.run({ command: 'context-refresh' } as never)
-  await w.clock.advance(1)
-  await endTurn($)
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
   await w.clock.advance(400)
-  expect(w.prompts).toHaveLength(1)
-  expect(w.compactions).toHaveLength(0)
   expect(w.compactedTo).toEqual([])
+  expect(w.prompts).toHaveLength(0)
+  expect(w.notifications[0]?.[0]).toBe('Claude Code — ❌ refresh 中止')
 })
 
-test('auto at >= 90%: runs the whole refresh and notifies start and completion', async ($, on) => {
+test('auto at >= 90%: notifies the start, asks for a tool turn, runs, notifies completion', async ($, on) => {
   const w = world($, on, { percent: 92 })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await endTurn($)
+  await boot($)
+  await workTurn($)
   await w.clock.advance(1)
-  expect(w.prompts[0]).toContain('context-snapshot-refresh')
-  expect(w.prompts[0]).toContain('Context at Save には 92% と書くこと')
+  expect(w.prompts[0]).toContain('自動 92%')
   expect(w.notifications).toEqual([['Claude Code — 🔄 自動 refresh 開始（92%）', '/work', 'snapshot → 会話リセット → 復元']])
 
-  await endTurn($)
+  expect(await toolTurn($, w.prompts[0]!)).toContain('Context at Save には 92% と書くこと')
   await w.clock.advance(400)
-  await endTurn($)
+  w.setPercent(1)
+  await restoreTurn($, w.prompts[1]!)
   expect(w.notifications[1]).toEqual(['Claude Code — ✅ refresh 完了', '/work', '作業を再開しました（session_id 維持）'])
   expect(w.notifications).toHaveLength(2)
 })
 
-test('auto: a missing snapshot notifies the failure', async ($, on) => {
-  const w = world($, on, { percent: 92, snapshotWritten: false })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await endTurn($)
+test('the 10/29 failure: a Monitor notification turn ending first does not stop an automatic refresh', async ($, on) => {
+  const w = world($, on, { percent: 92 })
+  await boot($)
+  await workTurn($)
   await w.clock.advance(1)
-  await endTurn($)
-  expect(w.notifications[1]?.[0]).toBe('Claude Code — ❌ refresh 中止')
-  expect(w.notifications[1]?.[2]).toContain('スナップショットが見つかりません')
+  // The queued Monitor event runs before the mod's request.
+  await workTurn($, '<task-notification> Monitor event: transcript updated')
+  expect(w.notifications).toHaveLength(1)
+
+  await toolTurn($, w.prompts[0]!)
+  await w.clock.advance(400)
+  expect(w.compactedTo).toEqual([RESET])
+  expect(w.notifications.some(n => n[0]?.includes('❌'))).toBe(false)
+})
+
+test('a turn other than the snapshot turn ending is ignored', async ($, on) => {
+  const w = world($, on)
+  await boot($)
+  const turnId = await startTurn($, 'コンテキストリフレッシュして')
+  await callTool($)
+  await endTurn($, 'some-other-turn')
+  await w.clock.advance(400)
+  expect(w.compactedTo).toEqual([])
+  expect(w.notifications).toEqual([])
+
+  await endTurn($, turnId)
+  await w.clock.advance(400)
+  expect(w.compactedTo).toEqual([RESET])
+})
+
+test('the person asks while an automatic request waits: their turn writes it, the late request does nothing', async ($, on) => {
+  const w = world($, on, { percent: 92 })
+  await boot($)
+  await workTurn($)
+  await w.clock.advance(1)
+  expect(await toolTurn($, 'いったんコンテキストリフレッシュして')).toContain('context-snapshot-refresh')
+  await w.clock.advance(400)
+  w.setPercent(1)
+  await restoreTurn($, w.prompts[1]!)
+
+  expect(await toolTurn($, w.prompts[0]!)).toContain('もう済んでいます')
+  expect(w.compactedTo).toHaveLength(1)
+})
+
+test('waits at most 10 minutes for the requested turn, then stops with a notification', async ($, on) => {
+  const w = world($, on, { percent: 92 })
+  await boot($)
+  await workTurn($)
+  await w.clock.advance(10 * 60 * 1000 + 1)
+  expect(w.notifications.at(-1)?.[0]).toBe('Claude Code — ❌ refresh 中止')
+  expect(w.notifications.at(-1)?.[2]).toContain('10 分')
+})
+
+test('after a failed automatic run, no automatic run for 30 minutes', async ($, on) => {
+  const w = world($, on, { percent: 92, snapshotWritten: false })
+  await boot($)
+  await workTurn($)
+  await w.clock.advance(1)
+  await toolTurn($, w.prompts[0]!)
+  expect(w.notifications.at(-1)?.[0]).toBe('Claude Code — ❌ refresh 中止')
+
+  await workTurn($)
+  await w.clock.advance(1)
+  expect(w.prompts).toHaveLength(1)
+
+  await w.clock.advance(31 * 60 * 1000)
+  await workTurn($)
+  await w.clock.advance(1)
+  expect(w.prompts).toHaveLength(2)
 })
 
 test('threshold comes from ctx-config.sh: 95 keeps 92% quiet', async ($, on) => {
   const w = world($, on, { percent: 92, configPercent: '95' })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await endTurn($)
+  await boot($)
+  await workTurn($)
   await w.clock.advance(1)
   expect(w.prompts).toHaveLength(0)
 })
 
 test('threshold from ctx-config.sh can be lower than 90', async ($, on) => {
   const w = world($, on, { percent: 88, configPercent: '85' })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await endTurn($)
+  await boot($)
+  await workTurn($)
   await w.clock.advance(1)
-  expect(w.prompts[0]).toContain('context-snapshot-refresh')
+  expect(w.prompts[0]).toContain('自動 88%')
 })
 
 test('auto: an aborted turn at 95% does not start a refresh', async ($, on) => {
   const w = world($, on, { percent: 95 })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await endTurn($, 'aborted')
+  await boot($)
+  await endTurn($, await startTurn($), 'aborted')
   await w.clock.advance(1)
   expect(w.prompts).toHaveLength(0)
-})
-
-test('natural language: the model calls the tool, writes the snapshot in that turn, then the mod empties and restores', async ($, on) => {
-  const w = world($, on)
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  const called = await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  expect(JSON.stringify(called)).toContain('context-snapshot-refresh')
-  expect(JSON.stringify(called)).toContain('Context at Save には 10% と書くこと')
-  await w.clock.advance(1)
-  expect(w.prompts).toHaveLength(0)
-
-  await endTurn($)
-  await w.clock.advance(400)
-  expect(w.compactedTo).toEqual([[{ role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] }]])
-  expect(w.prompts).toHaveLength(1)
-  expect(w.prompts[0]).toContain('context-restore')
-  expect(w.notifications).toEqual([])
 })
 
 test('the tool refuses a second run while one is in progress', async ($, on) => {
   world($, on)
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  const again = await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  expect(JSON.stringify(again)).toContain('実行中')
+  await boot($)
+  await startTurn($, 'コンテキストリフレッシュして')
+  await callTool($)
+  expect(JSON.stringify(await callTool($))).toContain('実行中')
 })
 
 test('the model cd-s before writing: the snapshot it actually wrote is found and used', async ($, on) => {
   const w = world($, on, { written: ['context_snapshot_-work-sub.md'] })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
   await w.clock.advance(400)
   expect(w.compactedTo).toHaveLength(1)
   expect(w.prompts[0]).toContain('/home/u/.claude/context_snapshot_-work-sub.md')
 })
 
-test('a manual run that stops is reported by notification, not only a toast', async ($, on) => {
-  const w = world($, on, { snapshotWritten: false })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
-  expect(w.notifications).toHaveLength(1)
-  expect(w.notifications[0]?.[0]).toBe('Claude Code — ❌ refresh 中止')
-})
-
 test('two fresh snapshots from other directories: refuses to guess', async ($, on) => {
   const w = world($, on, { written: ['context_snapshot_-a.md', 'context_snapshot_-b.md'] })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
   await w.clock.advance(400)
   expect(w.compactedTo).toEqual([])
   expect(w.notifications[0]?.[2]).toContain('2 件')
@@ -237,9 +301,8 @@ test('Windows: no bash, the home is USERPROFILE and paths take the C:/ form the 
     env: WINDOWS, cwd: 'C:\\Users\\u\\work', noSender: true,
     written: ['context_snapshot_C--Users-u-work.md', 'context_snapshot_C--Users-u-other.md'],
   })
-  await $.session.start({ source: 'startup', cwd: 'C:\\Users\\u\\work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($, 'C:\\Users\\u\\work')
+  await toolTurn($, 'コンテキストリフレッシュして')
   await w.clock.advance(400)
   expect(w.compactedTo).toHaveLength(1)
   expect(w.prompts[0]).toContain('C:/Users/u/.claude/context_snapshot_C--Users-u-work.md')
@@ -249,9 +312,8 @@ test('Windows: no bash, the home is USERPROFILE and paths take the C:/ form the 
 
 test('Windows: a stop is notified through the engine, not a script', async ($, on) => {
   const w = world($, on, { env: WINDOWS, cwd: 'C:\\Users\\u\\work', snapshotWritten: false })
-  await $.session.start({ source: 'startup', cwd: 'C:\\Users\\u\\work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($, 'C:\\Users\\u\\work')
+  await toolTurn($, 'コンテキストリフレッシュして')
   expect(w.uiNotes).toHaveLength(1)
   expect(JSON.stringify(w.uiNotes[0])).toContain('❌ refresh 中止')
   expect(w.runs).toEqual([])
@@ -259,18 +321,26 @@ test('Windows: a stop is notified through the engine, not a script', async ($, o
 
 test('a Japanese directory is named the way snapshot-path.sh names it (one dash per UTF-8 byte)', async ($, on) => {
   const w = world($, on, { cwd: '/tmp/日本語 dir/a.b', written: ['context_snapshot_-tmp-----------dir-a-b.md', 'context_snapshot_-other.md'] })
-  await $.session.start({ source: 'startup', cwd: '/tmp/日本語 dir/a.b' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($, '/tmp/日本語 dir/a.b')
+  await toolTurn($, 'コンテキストリフレッシュして')
   await w.clock.advance(400)
   expect(w.prompts[0]).toContain('/home/u/.claude/context_snapshot_-tmp-----------dir-a-b.md')
 })
 
 test('no notification script on a Mac: falls back to the engine notification', async ($, on) => {
   const w = world($, on, { snapshotWritten: false, noSender: true })
-  await $.session.start({ source: 'startup', cwd: '/work' } as never)
-  await $.tool.call({ tool: 'mcp__context-refresh__refresh', input: {} } as never)
-  await endTurn($)
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
   expect(w.notifications).toEqual([])
   expect(w.uiNotes).toHaveLength(1)
+})
+
+test('decisions go to a per-session log, with the context figures behind an automatic start', async ($, on) => {
+  const w = world($, on, { percent: 92 })
+  await boot($)
+  await workTurn($)
+  const last = w.logs.at(-1)!
+  expect(JSON.stringify(last)).toContain('/home/u/.claude/context-refresh-sess-1-a.log')
+  expect(JSON.stringify(last)).toContain('auto-check')
+  expect(JSON.stringify(last)).toContain('\\"tokens\\":920')
 })

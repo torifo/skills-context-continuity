@@ -6,8 +6,12 @@ const COMMAND = 'context-refresh'
 const TOOL = 'refresh'
 const TOOL_FULL = 'mcp__context-refresh__refresh'
 const DEFAULT_AUTO_PERCENT = 90
+const WAIT_LIMIT_MS = 10 * 60 * 1000
+const AUTO_COOLDOWN_MS = 30 * 60 * 1000
 
-type Phase = 'idle' | 'snapshotting' | 'compacting' | 'restoring'
+// pending: asked for a turn that calls the tool; snapshotting: that turn writes the snapshot.
+type Phase = 'idle' | 'pending' | 'snapshotting' | 'compacting' | 'restoring'
+type Timer = ReturnType<EngineInterface['clock']['after']>
 
 let phase: Phase = 'idle'
 let startedAt = 0
@@ -19,22 +23,31 @@ let isSessionKept = true
 let autoPercent = DEFAULT_AUTO_PERCENT
 // Set only for an automatic run: the person may be away, so it reports by macOS notification.
 let autoAt: number | undefined
+let autoCooldownUntil = 0
+let currentTurnId: string | undefined
+let currentTurnText = ''
+// Other turns (a Monitor's notifications, the person's next message) may end first; only these count.
+let snapshotTurnId: string | undefined
+let restoreTurnId: string | undefined
+let waitTimer: Timer | undefined
+let logPath: string | undefined
+const logLines: string[] = []
 
 const COMPACT_ARGS = 'context-refresh: reset'
 const RESET_MARK = '（context-refresh: 会話をリセットしました）'
+const REQUEST_MARK = 'context-refresh mod からの依頼'
+const RESTORE_MARK = 'context-refresh で会話を空にしました'
 
 // The model cannot see its own context fill and guesses badly, so the snapshot gets the engine's figure.
 const savedAt = () =>
   percentAtStart === undefined ? 'Context at Save は「不明」と書くこと。' : `Context at Save には ${percentAtStart}% と書くこと（推測しない）。`
 
-const snapshotPrompt = () =>
-  'context-snapshot-refresh スキルを起動し、その手順でスナップショットを作成してください。' +
-  savedAt() +
-  '書き終えたら「スナップショット作成完了」とだけ返してターンを終えること（/clear・/compact は不要。続きは context-refresh mod が自動で行う）。'
+const requestPrompt = (trigger: string) =>
+  `${REQUEST_MARK}（${trigger}）です。${TOOL_FULL} を呼び、その結果の指示に従ってください。`
 
 const TOOL_DESCRIPTION =
   'Context refresh: saves a snapshot, empties this conversation while keeping the same session id, then resumes from the snapshot automatically. ' +
-  'Call this when the user asks to refresh the context (e.g. 「コンテキストリフレッシュして」「リフレッシュして」「context refresh」). ' +
+  'Call this when the user asks to refresh the context (e.g. 「コンテキストリフレッシュして」「リフレッシュして」「context refresh」) or when the context-refresh mod asks you to. ' +
   'Call it first, then follow its result. Never run /clear or /compact for this.'
 
 const toolResult = () =>
@@ -43,7 +56,7 @@ const toolResult = () =>
   savedAt()
 
 const restorePrompt = (path: string) =>
-  'context-refresh で会話を空にしました（session_id は維持）。context-restore スキルの手順で作業を再開してください。' +
+  `${RESTORE_MARK}（session_id は維持）。context-restore スキルの手順で作業を再開してください。` +
   `スナップショットが注入されていなければ ${path} を Read すること。`
 
 const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
@@ -61,6 +74,18 @@ async function home($: EngineInterface): Promise<string> {
   if (!(await isWindows($))) return (await $.env.get('HOME')) ?? ''
 
   return toWindowsForm((await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '')
+}
+
+// One file per session, the last 300 decisions: what to read when a refresh stops for no clear reason.
+async function log($: EngineInterface, event: string, data: Record<string, unknown> = {}) {
+  try {
+    logLines.push(JSON.stringify({ at: new Date(await $.clock.now()).toISOString(), event, phase, ...data }))
+    if (logLines.length > 300) logLines.splice(0, logLines.length - 300)
+    logPath ??= `${await home($)}/.claude/context-refresh-${(await $.session.id()).slice(0, 8)}.log`
+    await $.fs.write(logPath, `${logLines.join('\n')}\n`)
+  } catch {
+    // Logging must never stop the refresh.
+  }
 }
 
 // Same name as hooks/snapshot-path.sh and .ps1: every UTF-8 byte outside [0-9A-Za-z] becomes '-'.
@@ -124,8 +149,22 @@ async function notify($: EngineInterface, title: string, body: string, isAlways 
   }
 }
 
+function clearWait() {
+  waitTimer?.cancel()
+  waitTimer = undefined
+}
+
+function waitAtMost($: EngineInterface, onTimeout: () => Promise<void>) {
+  clearWait()
+  waitTimer = $.clock.after(WAIT_LIMIT_MS, () => void onTimeout())
+}
+
 async function finish($: EngineInterface, outcome: { failed: string } | 'restored') {
+  await log($, 'finish', { outcome })
+  clearWait()
   phase = 'idle'
+  snapshotTurnId = undefined
+  restoreTurnId = undefined
   $.ui.status(undefined)
   if (outcome === 'restored') {
     $.ui.toast('context-refresh: 復元完了')
@@ -133,29 +172,50 @@ async function finish($: EngineInterface, outcome: { failed: string } | 'restore
   } else {
     $.ui.toast(`context-refresh: ${outcome.failed}`)
     await notify($, '❌ refresh 中止', outcome.failed, true)
+    // A failed automatic run must not restart on the very next turn and fail again.
+    if (autoAt !== undefined) autoCooldownUntil = (await $.clock.now()) + AUTO_COOLDOWN_MS
   }
   autoAt = undefined
 }
 
-// Snapshotting begins now; the turn that writes the snapshot is either this one (tool) or a submitted one.
-async function arm($: EngineInterface, percent?: number) {
+// The turn running this tool call writes the snapshot.
+async function bindSnapshotTurn($: EngineInterface) {
+  if (phase === 'idle') {
+    autoAt = undefined
+    percentAtStart = (await $.session.usage()).context.percent
+  }
+  clearWait()
   armedPath = await resolveSnapshotPath($)
   snapshotPath = ''
   startedAt = await $.clock.now()
-  percentAtStart = (await $.session.usage()).context.percent
-  autoAt = percent
+  snapshotTurnId = currentTurnId
   phase = 'snapshotting'
   $.ui.status('refresh: snapshot…')
+  await log($, 'bind', { snapshotTurnId })
 }
 
+// /context-refresh and the 90% trigger: ask for a turn that calls the tool, so the snapshot turn is one we can name.
 async function start($: EngineInterface, percent?: number): Promise<string> {
   if (phase !== 'idle') return `context-refresh は実行中です（${phase}）`
-  await arm($, percent)
+  autoAt = percent
+  percentAtStart = (await $.session.usage()).context.percent
+  phase = 'pending'
+  $.ui.status('refresh: 開始待ち…')
+  const trigger = percent === undefined ? '手動' : `自動 ${percent}%`
+  await log($, 'start', { trigger })
   // A command.run hook may not submit (it would wait on its own turn): defer to a timer.
-  $.clock.after(0, () => void $.prompt.submit({ text: snapshotPrompt() }))
+  $.clock.after(0, () => {
+    $.prompt.submit({ text: requestPrompt(trigger) }).catch(error => {
+      void log($, 'submit-failed', { error: String(error) })
+      if (phase === 'pending') void finish($, { failed: '開始のプロンプトを送れませんでした' })
+    })
+  })
+  waitAtMost($, async () => {
+    if (phase === 'pending') await finish($, { failed: '10 分待っても始められませんでした（バックグラウンドの作業が動き続けていると始まらないことがあります）' })
+  })
   await notify($, `🔄 自動 refresh 開始（${percent}%）`, 'snapshot → 会話リセット → 復元')
 
-  return `context-refresh 開始（${percent === undefined ? '手動' : `自動 ${percent}%`}）: snapshot → 会話を0に → restore`
+  return `context-refresh 開始（${trigger}）: snapshot → 会話を0に → restore`
 }
 
 // Runs between turns: compaction rejects while a turn runs, so retry briefly.
@@ -176,9 +236,14 @@ function emptyConversation($: EngineInterface, tries = 0) {
       const after = await $.session.id()
       isSessionKept = before === after
       phase = 'restoring'
+      restoreTurnId = undefined
       $.ui.status('refresh: restore…')
       $.ui.log(`context-refresh: 会話を空にしました（session_id ${after}${isSessionKept ? ' 維持' : ` ← ${before} から変化`}）`)
-      void $.prompt.submit({ text: restorePrompt(snapshotPath) })
+      await log($, 'emptied', { isSessionKept, snapshotPath })
+      $.prompt.submit({ text: restorePrompt(snapshotPath) }).catch(error => void log($, 'submit-failed', { error: String(error) }))
+      waitAtMost($, async () => {
+        if (phase === 'restoring') await finish($, { failed: '会話は空にしましたが、再開のプロンプトが始まりませんでした。何か送れば、スナップショットから復元されます' })
+      })
     })()
   })
 }
@@ -202,10 +267,27 @@ export const register: Register = on => {
     return { text: `context-refresh を開始できませんでした（詳細は claude --debug）` }
   })
 
-  // The model's way in: 「コンテキストリフレッシュして」 -> this tool -> snapshot in the same turn.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      currentTurnId = e.turnId
+      currentTurnText = e.text
+      if (phase === 'restoring' && e.text.includes(RESTORE_MARK)) restoreTurnId = e.turnId
+    }
+
+    return next(e)
+  })
+
+  // The model's way in: 「コンテキストリフレッシュして」 or the mod's own request -> this tool -> snapshot in the same turn.
   on('tool.call', { tool: TOOL_FULL }, async $ => {
-    if (phase !== 'idle') return { result: `context-refresh は実行中です（${phase}）。何もせずターンを終えてください。` }
-    await arm($)
+    // A request the mod sent earlier may arrive after that refresh ended: it must not start a new one.
+    if (phase === 'idle' && currentTurnText.includes(REQUEST_MARK)) {
+      await log($, 'stale-request', { turnId: currentTurnId })
+
+      return { result: 'この依頼はもう済んでいます。この呼び出しは何もしません。リフレッシュは動いていないので、今の作業をそのまま続けてください。' }
+    }
+    // Worded so the model goes on with its work: "do nothing" was once read as "stop working" for every later turn.
+    if (phase !== 'idle' && phase !== 'pending') return { result: `context-refresh は別のターンで実行中です（${phase}）。この呼び出しは何もしません。待たずに、今の作業をそのまま続けてください。` }
+    await bindSnapshotTurn($)
 
     return { result: toolResult() }
   }).catch(() => {
@@ -227,9 +309,15 @@ export const register: Register = on => {
     if (e.agentId !== undefined) return result
 
     if (phase === 'snapshotting') {
+      if (snapshotTurnId !== undefined && e.turnId !== snapshotTurnId) {
+        await log($, 'other-turn', { turnId: e.turnId, snapshotTurnId })
+
+        return result
+      }
       if (e.reason !== 'answer') await finish($, { failed: 'スナップショット作成が中断されました' })
       else {
         const found = await findSnapshot($)
+        await log($, 'snapshot-turn-done', { found })
         if ('failed' in found) await finish($, found)
         else {
           snapshotPath = found.path
@@ -239,12 +327,18 @@ export const register: Register = on => {
         }
       }
     } else if (phase === 'restoring') {
+      // Without a recognised restore turn, the first turn that ends is the best evidence there is.
+      if (restoreTurnId !== undefined && e.turnId !== restoreTurnId) return result
       await finish($, 'restored')
     } else if (phase === 'idle' && e.reason === 'answer') {
-      const { percent } = (await $.session.usage()).context
+      const { tokens, window, percent } = (await $.session.usage()).context
       if (percent !== undefined && percent >= autoPercent) {
-        $.ui.toast(`context-refresh: コンテキスト ${percent}% のため自動 refresh します`)
-        await start($, percent)
+        const now = await $.clock.now()
+        await log($, 'auto-check', { tokens, window, percent, autoPercent, isCoolingDown: now < autoCooldownUntil })
+        if (now >= autoCooldownUntil) {
+          $.ui.toast(`context-refresh: コンテキスト ${percent}% のため自動 refresh します`)
+          await start($, percent)
+        }
       }
     }
 
