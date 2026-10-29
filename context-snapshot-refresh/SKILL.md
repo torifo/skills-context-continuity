@@ -49,6 +49,8 @@ Phase 1 で得たパスに Write ツールで書き込む。**該当する内容
 
 `Context at Save` には mod から伝えられた値（ツールの結果か mod のプロンプトにある「Context at Save には N% と書くこと」）をそのまま書く。自分では推測しない。伝えられていなければ「不明」。
 
+ターンが終わると、mod が末尾に「付録：会話記録からの自動抽出」を追記する（ユーザーの発言の原文、編集したファイル、会話に出た URL、空にする前の会話が残る記録ファイルのパス）。付録は機械的な抜き出しなので、どれが今も使うものか、どれが置き換え済みかは分からない。その判断は本文に書く（特に「公開・共有したもの」）。
+
 ````markdown
 # Claude Context Snapshot
 Created: YYYY-MM-DDTHH:MM:SS+09:00
@@ -104,6 +106,13 @@ Context at Save: XX%
 
 ---
 
+## 公開・共有したもの
+
+- [URL またはパス]（Artifact・Slack のスレッドや下書き・PR・配布ファイルなど）— [何か] ／ [最新か、置き換え済みか（何に置き換えたか）]
+（同じものの旧版も書く。復元後の「あのスライド」「あのスレッド」がどれを指すか分かるように）
+
+---
+
 ## エラー・問題（デバッグ中の場合）
 
 **エラーメッセージ（verbatim）**:
@@ -148,6 +157,7 @@ verbatim 全量を退避済み → `Read <スナップショットパス（.md �
 | コードは実物か | 「handleAuth関数を修正中」 | 実際のコード全体 |
 | 次のアクションは実行できるか | 「テストを書く」 | `bun test src/auth.test.ts` |
 | エラーはverbatimか | 「型エラーが出た」 | `Type 'string' is not assignable to...` |
+| 公開・共有したものに URL と最新かどうかがあるか | 「スライドを作った」 | 「`https://…/CYgK…` は旧版。配布するのは `~/…/refresh-slides.pdf`」 |
 | ユーザーへの確認が0件で続けられるか | — | **これが最終基準** |
 
 **NGがあれば、Edit ツールで該当セクションだけ直す（全文の書き直しは禁止 — 時間が倍になる）。**
@@ -162,6 +172,7 @@ verbatim 全量を退避済み → `Read <スナップショットパス（.md �
 
 refresh 後の最初のプロンプトで UserPromptSubmit フック（restore-context.sh）がスナップショットを自動注入する。以降は context-restore スキルの手順どおり（報告 → 作業再開 → スナップショット削除）。
 注入されていなければ `Read "$(bash ~/.claude/hooks/snapshot-path.sh)"`（PowerShell では `& "$env:USERPROFILE\.claude\hooks\snapshot-path.ps1"` が出したパス）。
+スナップショットにも付録にも無いことは、ユーザーに聞く前に付録の記録ファイルを検索する（手順は context-restore）。
 
 ## よくある失敗
 

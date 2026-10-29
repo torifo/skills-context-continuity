@@ -17,6 +17,7 @@ let phase: Phase = 'idle'
 let startedAt = 0
 let percentAtStart: number | undefined
 let snapshotPath = ''
+let transcriptPath = ''
 let armedPath = ''
 let didReset = false
 let isSessionKept = true
@@ -56,9 +57,26 @@ const toolResult = () =>
   'ターン終了後に context-refresh mod が会話を空にし（session_id 維持）、context-restore を自動で始めます。' +
   savedAt()
 
-const restorePrompt = (path: string) =>
+const restorePrompt = (path: string, transcript: string) =>
   `${RESTORE_MARK}（session_id は維持）。context-restore スキルの手順で作業を再開してください。` +
-  `スナップショットが注入されていなければ ${path} を Read すること。`
+  `スナップショットが注入されていなければ ${path} を Read すること。` +
+  (transcript === '' ? '' : `スナップショットに無いことは、ユーザーに聞く前に、空にする前の会話の記録 ${transcript} を検索すること。`)
+
+const APPENDIX_TITLE = '## 付録：会話記録からの自動抽出（context-refresh mod が追記）'
+const WORDS_LIMIT = 500
+const WORDS_KEPT = 100
+const URLS_KEPT = 80
+const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit']
+const URL_PATTERN = /https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%]+/g
+// What reaches the conversation as a user message without the person having typed it.
+const NOT_WORDS = [
+  /^<(command-message|command-args|local-command-|bash-|task-notification)/,
+  /^Base directory for this skill:/,
+  /^\(Re-invocation of \//,
+  /^\[SYSTEM NOTIFICATION/,
+  /^Another Claude session sent a message/,
+  /^This session is being continued from a previous conversation/,
+]
 
 const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
 
@@ -129,6 +147,102 @@ async function findSnapshot($: EngineInterface): Promise<{ path: string } | { fa
   return path === undefined ? { failed: `今回書かれたスナップショットが ${fresh.length} 件あり、どれか決められません` } : { path }
 }
 
+// Same name as Claude Code's projects folders: every character outside [0-9A-Za-z] becomes '-'.
+const projectKey = (dir: string) => dir.replace(/[^0-9A-Za-z]/g, '-')
+
+// The .jsonl keeps all that a refresh empties. A long path gets a folder name of its own, so look when it is not where predicted.
+async function findTranscript($: EngineInterface): Promise<string> {
+  const projects = `${await home($)}/.claude/projects`
+  const file = `${await $.session.id()}.jsonl`
+  for (const dir of new Set([projectKey(await $.session.root()), projectKey(await $.session.cwd())])) {
+    if (await $.fs.exists(`${projects}/${dir}/${file}`)) return `${projects}/${dir}/${file}`
+  }
+  for (const entry of await $.fs.list(projects)) {
+    if (entry.kind === 'dir' && (await $.fs.exists(`${projects}/${entry.name}/${file}`))) return `${projects}/${entry.name}/${file}`
+  }
+
+  return ''
+}
+
+// The person's own words in a user message, or undefined for what the engine, a skill or this mod put there.
+function personWords(text: string): string | undefined {
+  let words = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+  const command = /^<command-name>\s*(\S+?)\s*<\/command-name>/.exec(words)
+  if (command) words = `${command[1]} ${/<command-args>([\s\S]*?)<\/command-args>/.exec(words)?.[1] ?? ''}`.trim()
+  if (words === '' || words === RESET_MARK || [REQUEST_MARK, RESTORE_MARK, COMPACT_ARGS].some(mark => words.includes(mark))) return undefined
+
+  return NOT_WORDS.some(pattern => pattern.test(words)) ? undefined : words
+}
+
+function clip(text: string): string {
+  const chars = [...text]
+
+  return chars.length > WORDS_LIMIT ? `${chars.slice(0, WORDS_LIMIT).join('')}…（以下略）` : text
+}
+
+// What a snapshot written by judgement can leave out, taken mechanically: the person's words, edited files, URLs.
+async function buildAppendix($: EngineInterface): Promise<{ text: string; counts: Record<string, number> }> {
+  const all = await $.session.messages()
+  // Only what this refresh empties: an earlier refresh's turns were handed over by its own snapshot.
+  const messages = all.slice(all.findLastIndex(m => m.role === 'user' && m.text.trim() === RESET_MARK) + 1)
+  const words: string[] = []
+  const edits = new Map<string, number>()
+  const urls: string[] = []
+  for (const m of messages) {
+    const text = m.role === 'user' ? personWords(m.text) : m.text
+    if (text === undefined) continue
+    if (m.role === 'user') words.push(text)
+    for (const url of text.match(URL_PATTERN) ?? []) {
+      const trimmed = url.replace(/[.,;:!?]+$/, '')
+      if (!urls.includes(trimmed)) urls.push(trimmed)
+    }
+    for (const use of m.toolUses) {
+      const path = EDIT_TOOLS.includes(use.tool) ? use.input.file_path ?? use.input.notebook_path : undefined
+      // The snapshot and its git sidecar are this refresh's own writing.
+      if (typeof path === 'string' && !/context_snapshot_[^/\\]*$/.test(path)) edits.set(path, (edits.get(path) ?? 0) + 1)
+    }
+  }
+  const kept = words.slice(-WORDS_KEPT)
+  const list = (lines: string[]) => (lines.length === 0 ? 'なし' : lines.join('\n'))
+  const text = [
+    '---',
+    '',
+    APPENDIX_TITLE,
+    '本文を補う機械的な抜き出し。どれが最新か、どれが置き換え済みかの判断は本文に従う。',
+    '',
+    transcriptPath === ''
+      ? `記録ファイル: 見つかりませんでした（~/.claude/projects/*/${await $.session.id()}.jsonl を探すこと）`
+      : `記録ファイル: ${transcriptPath}`,
+    '空にする前の会話はすべてこのファイルに残っている（最後の compact_boundary より前）。本文にも付録にも無いことは、ユーザーに聞く前にここを検索する。',
+    '',
+    `### ユーザーの発言（原文・古い順・1 件 ${WORDS_LIMIT} 字まで）`,
+    ...(words.length > kept.length ? [`（古い ${words.length - kept.length} 件は省略。記録ファイルにある）`] : []),
+    list(kept.map((w, i) => `${i + 1}. ${clip(w).replace(/\n/g, '\n   ')}`)),
+    '',
+    '### 編集したファイル（Edit / Write / NotebookEdit）',
+    list([...edits].map(([path, n]) => `- ${path}（${n} 回）`)),
+    '',
+    '### 会話に出た URL（ユーザーの発言と Claude の返答から）',
+    list(urls.slice(-URLS_KEPT).map(url => `- ${url}`)),
+    '',
+  ].join('\n')
+
+  return { text, counts: { words: words.length, edits: edits.size, urls: urls.length } }
+}
+
+// Runs before the conversation is emptied, while the messages are still there to read.
+async function appendToSnapshot($: EngineInterface) {
+  transcriptPath = await findTranscript($).catch(() => '')
+  try {
+    const { text, counts } = await buildAppendix($)
+    await $.fs.write(snapshotPath, `${(await $.fs.read(snapshotPath)).trimEnd()}\n\n${text}`)
+    await log($, 'appendix', { transcriptPath, ...counts })
+  } catch (error) {
+    // The snapshot as the model wrote it still restores the work: never stop the refresh over the appendix.
+    await log($, 'appendix-failed', { transcriptPath, error: String(error) })
+  }
+}
+
 // Same format and sound as ctx-notify.sh, through its shared sender.
 // Start and finish are notified for automatic runs only; a stop always is, since a toast is invisible in the desktop app.
 async function notify($: EngineInterface, title: string, body: string, isAlways = false) {
@@ -188,6 +302,7 @@ async function bindSnapshotTurn($: EngineInterface) {
   clearWait()
   armedPath = await resolveSnapshotPath($)
   snapshotPath = ''
+  transcriptPath = ''
   startedAt = await $.clock.now()
   snapshotTurnId = currentTurnId
   phase = 'snapshotting'
@@ -241,7 +356,7 @@ function emptyConversation($: EngineInterface, tries = 0) {
       $.ui.status('refresh: restore…')
       $.ui.log(`context-refresh: 会話を空にしました（session_id ${after}${isSessionKept ? ' 維持' : ` ← ${before} から変化`}）`)
       await log($, 'emptied', { isSessionKept, snapshotPath })
-      $.prompt.submit({ text: restorePrompt(snapshotPath) }).catch(error => void log($, 'submit-failed', { error: String(error) }))
+      $.prompt.submit({ text: restorePrompt(snapshotPath, transcriptPath) }).catch(error => void log($, 'submit-failed', { error: String(error) }))
       waitAtMost($, async () => {
         if (phase === 'restoring') await finish($, { failed: '会話は空にしましたが、再開のプロンプトが始まりませんでした。何か送れば、スナップショットから復元されます' })
       })
@@ -327,6 +442,7 @@ export const register: Register = on => {
         if ('failed' in found) await finish($, found)
         else {
           snapshotPath = found.path
+          await appendToSnapshot($)
           phase = 'compacting'
           $.ui.status('refresh: 会話を空に…')
           emptyConversation($)

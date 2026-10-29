@@ -5,7 +5,12 @@ import type { On } from 'claude-code'
 const SNAP = '/home/u/.claude/context_snapshot_-work.md'
 const RESET = [{ role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] }]
 
-type WorldOpts = { percent?: number; snapshotWritten?: boolean; written?: string[]; configPercent?: string; env?: Record<string, string>; cwd?: string; noSender?: boolean }
+const TRANSCRIPT = '/home/u/.claude/projects/-work/sess-1-abcdef.jsonl'
+
+type WorldOpts = {
+  percent?: number; snapshotWritten?: boolean; written?: string[]; configPercent?: string; env?: Record<string, string>; cwd?: string; noSender?: boolean
+  messages?: unknown[]; messagesFail?: boolean; transcriptAt?: string; projectDirs?: string[]
+}
 
 function world($: Engine, on: On, opts: WorldOpts = {}) {
   const clock = mock.clock(on, { now: 1000 })
@@ -48,10 +53,19 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
   on('fs.exists', (_$, e) => {
     const path = String((e as unknown as { path?: string }).path ?? JSON.stringify(e))
     if (path.endsWith('ctx-notify-send.sh')) return { value: !opts.noSender } as never
+    if (path.endsWith('.jsonl')) return { value: path === (opts.transcriptAt ?? TRANSCRIPT) } as never
 
     return { value: path.endsWith('ctx-config.sh') && opts.configPercent !== undefined } as never
   })
-  on('fs.read', () => ({ value: `CTX_HIGH_THRESHOLD=80\nCTX_AUTO_REFRESH_THRESHOLD=${opts.configPercent}\n` }) as never)
+  on('fs.read', (_$, e) =>
+    e.path.endsWith('.md')
+      ? ({ value: '# Claude Context Snapshot\n本文\n' }) as never
+      : ({ value: `CTX_HIGH_THRESHOLD=80\nCTX_AUTO_REFRESH_THRESHOLD=${opts.configPercent}\n` }) as never)
+  on('session.messages', () => {
+    if (opts.messagesFail) throw new Error('messages unavailable')
+
+    return { value: opts.messages ?? [] } as never
+  })
   on('fs.write', (_$, e) => {
     logs.push(e as unknown as { path: string; text: string })
 
@@ -64,7 +78,9 @@ function world($: Engine, on: On, opts: WorldOpts = {}) {
   })
   // ~/.claude as the model left it: this run's snapshots (fresh), an old one, a sidecar.
   const written = opts.written ?? (opts.snapshotWritten === false ? [] : ['context_snapshot_-work.md'])
-  on('fs.list', (_$, e) => (listed.push(e), { value: [
+  on('fs.list', (_$, e) => (listed.push(e), e.path.endsWith('/projects') ? {
+    value: (opts.projectDirs ?? ['-work']).map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 1, isLink: false })),
+  } : { value: [
     ...written.map(name => ({ name, kind: 'file', size: 10, mtimeMs: mtime, isLink: false })),
     { name: 'context_snapshot_-old.md', kind: 'file', size: 10, mtimeMs: 1, isLink: false },
     { name: 'context_snapshot_-work.git.txt', kind: 'file', size: 10, mtimeMs: 5000, isLink: false },
@@ -353,6 +369,74 @@ test('no notification script on a Mac: falls back to the engine notification', a
   await toolTurn($, 'コンテキストリフレッシュして')
   expect(w.notifications).toEqual([])
   expect(w.uiNotes).toHaveLength(1)
+})
+
+// What the snapshot file holds after the mod appended to it.
+const snapshotAsWritten = (w: ReturnType<typeof world>) => w.logs.filter(l => l.path === SNAP).at(-1)?.text ?? ''
+
+test('the snapshot gets an appendix: the transcript, the person\'s words, edited files and URLs, without the noise', async ($, on) => {
+  const long = `長い依頼${'あ'.repeat(600)}`
+  const w = world($, on, { messages: [
+    { role: 'user', text: '前回のリフレッシュより前の依頼', toolUses: [] },
+    { role: 'user', text: '（context-refresh: 会話をリセットしました）', toolUses: [] },
+    { role: 'user', text: 'スレッドに返信したい https://example.slack.com/archives/C0A/p1?thread_ts=1.2&cid=C0A', toolUses: [] },
+    { role: 'assistant', text: '公開しました：https://claude.ai/artifact/Gf5nu。', toolUses: [
+      { tool_use_id: '1', tool: 'Write', input: { file_path: '/work/a.md', content: 'x' } },
+      { tool_use_id: '2', tool: 'Edit', input: { file_path: '/work/a.md', old_string: 'x', new_string: 'y' } },
+      { tool_use_id: '3', tool: 'NotebookEdit', input: { notebook_path: '/work/n.ipynb' } },
+      { tool_use_id: '4', tool: 'Write', input: { file_path: SNAP, content: 'snap' } },
+    ] },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: '1', text: 'ok' }] },
+    { role: 'user', text: '<command-name>/auto-mode-setup</command-name>\n<command-message>auto-mode-setup</command-message>\n<command-args></command-args>', toolUses: [] },
+    { role: 'user', text: '<command-name>/compact</command-name>\n<command-args>context-refresh: reset</command-args>', toolUses: [] },
+    { role: 'user', text: 'Base directory for this skill: /x\n# Skill', toolUses: [] },
+    { role: 'user', text: '(Re-invocation of /superpowers:systematic-debugging — the skill instructions were previously loaded)', toolUses: [] },
+    { role: 'user', text: long, toolUses: [] },
+    { role: 'user', text: 'context-refresh mod からの依頼（手動）です。', toolUses: [] },
+    { role: 'user', text: '<system-reminder>注入</system-reminder>\nコンテキストリフレッシュして', toolUses: [] },
+  ] })
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
+  const snap = snapshotAsWritten(w)
+  expect(snap.startsWith('# Claude Context Snapshot\n本文\n')).toBe(true)
+  expect(snap).toContain('## 付録：会話記録からの自動抽出')
+  expect(snap).toContain(TRANSCRIPT)
+  expect(snap).toContain('1. スレッドに返信したい https://example.slack.com/archives/C0A/p1?thread_ts=1.2&cid=C0A')
+  expect(snap).toContain('2. /auto-mode-setup')
+  expect(snap).toContain(`3. 長い依頼${'あ'.repeat(496)}…（以下略）`)
+  expect(snap).toContain('4. コンテキストリフレッシュして')
+  expect(snap).toContain('- /work/a.md（2 回）')
+  expect(snap).toContain('- /work/n.ipynb（1 回）')
+  expect(snap).toContain('- https://claude.ai/artifact/Gf5nu\n')
+  for (const noise of ['前回のリフレッシュより前', 'mod からの依頼', 'context-refresh: reset', 'Base directory', 'Re-invocation', 'system-reminder', `- ${SNAP}`]) {
+    expect(snap).not.toContain(noise)
+  }
+
+  await w.clock.advance(400)
+  expect(w.compactedTo).toEqual([RESET])
+  expect(w.prompts[0]).toContain(TRANSCRIPT)
+  expect(w.prompts[0]).toContain('ユーザーに聞く前に')
+})
+
+test('a transcript in a folder named some other way is found by looking through the projects folders', async ($, on) => {
+  const elsewhere = '/home/u/.claude/projects/-work-hashed-1a2b/sess-1-abcdef.jsonl'
+  const w = world($, on, { transcriptAt: elsewhere, projectDirs: ['-other', '-work-hashed-1a2b'] })
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
+  await w.clock.advance(400)
+  expect(snapshotAsWritten(w)).toContain(elsewhere)
+  expect(w.prompts[0]).toContain(elsewhere)
+})
+
+test('no messages to read: the refresh goes on with the snapshot as the model wrote it', async ($, on) => {
+  const w = world($, on, { messagesFail: true })
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
+  await w.clock.advance(400)
+  expect(snapshotAsWritten(w)).toBe('')
+  expect(w.compactedTo).toEqual([RESET])
+  expect(w.prompts[0]).toContain(SNAP)
+  expect(JSON.stringify(w.logs.at(-1))).toContain('appendix-failed')
 })
 
 test('decisions go to a per-session log, with the context figures behind an automatic start', async ($, on) => {

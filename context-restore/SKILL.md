@@ -41,6 +41,23 @@ When you see these markers, immediately follow the procedure below.
    $SNAP = & "$env:USERPROFILE\.claude\hooks\snapshot-path.ps1"; Remove-Item -LiteralPath $SNAP, ($SNAP -replace '\.md$', '.git.txt') -Force -ErrorAction SilentlyContinue
    ```
 
+## When Something Is Missing
+
+The snapshot is written by judgement and can leave things out (a URL, a draft's exact wording, an earlier detail). Before asking the user, look in this order:
+
+1. **The appendix** at the end of the snapshot (`## 付録：会話記録からの自動抽出`, added by the context-refresh mod): the user's words verbatim, edited files, URLs seen in the conversation, and the transcript path.
+2. **The transcript** named there and in the mod's restore prompt. A refresh empties the conversation but the session's `.jsonl` keeps all of it; the part before the last `compact_boundary` is what was emptied. After `/clear` the old conversation is in the previous session's file instead: `ls -t ~/.claude/projects/<cwd key>/*.jsonl | head -3`.
+   ```bash
+   T=<transcript path>
+   # the user's own words, oldest first
+   jq -r 'select(.type=="user" and .origin.kind=="human") | .message.content | if type=="string" then . else (map(select(.type=="text") | .text) | join("\n")) end' "$T"
+   # anything else: find a keyword, then read around the hit
+   grep -n '<keyword>' "$T" | cut -c1-300 | tail -20
+   ```
+   Never read the whole file (it can be tens of MB): filter with `jq` / `grep` and cut long lines.
+
+Ask the user only when neither has it.
+
 ## Rules
 
 - Skip restore if snapshot is older than 60 minutes (hook won't inject stale files)
