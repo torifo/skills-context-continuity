@@ -66,8 +66,9 @@ Experimental. Checked with the mod's tests (`claude plugin test mods/context-ref
 
 1. Claude calls the mod's tool, `mcp__context-refresh__refresh`: when you ask in plain words, or because the mod asked it to (`/context-refresh`, the 90% trigger). The turn that calls the tool writes the same snapshot and `.git.txt` as `context-snapshot-clear`, then just ends. Other turns that end meanwhile (a background Monitor's events, your next message) are ignored.
 2. When the turn ends, the mod looks in `~/.claude` for the snapshot written during this run (by modification time). It does not predict the file name, so it still finds the snapshot when Claude's shell `cd`s before writing. If several were written, it prefers the current directory's, then the project root's.
-3. The mod runs `/compact` and answers that compaction itself with one marker line, so no summary is made. One line is the minimum: the engine refuses a compaction that leaves no message.
-4. The mod submits a prompt that starts `context-restore`. `restore-context.sh` injects the snapshot as usual.
+3. Before emptying, the mod appends an appendix to the snapshot, taken mechanically from the conversation: your messages verbatim (up to 500 characters each), the files edited with Edit / Write / NotebookEdit, the URLs that came up, and the path of the session's transcript. A snapshot written by judgement can leave such things out; in one real run it missed two published pages and a Slack thread. If the appendix cannot be made, the refresh goes on with the snapshot as written.
+4. The mod runs `/compact` and answers that compaction itself with one marker line, so no summary is made. One line is the minimum: the engine refuses a compaction that leaves no message.
+5. The mod submits a prompt that starts `context-restore` and names the transcript. `restore-context.sh` injects the snapshot as usual. The conversation is empty now, but the transcript `.jsonl` still holds all of it, so for anything the snapshot and the appendix lack, `context-restore` searches the transcript before asking you.
 
 You can also just ask for it in plain words (「コンテキストリフレッシュして」, "refresh the context"). The mod registers a tool, `mcp__context-refresh__refresh`, that Claude calls first; Claude then writes the snapshot in the same turn and the mod does the rest. It also starts by itself when a turn ends normally with the context at 90% or more.
 
@@ -99,9 +100,9 @@ If you ask for a refresh in a session without the mod, `context-snapshot-refresh
 Optional, read from `~/.claude/hooks/` if present (not bundled):
 
 - `ctx-config.sh` setting `CTX_AUTO_REFRESH_THRESHOLD` changes the 90% trigger.
-Each session keeps the mod's last 300 decisions in `~/.claude/context-refresh-<session>.log`, to read when a refresh stops for no clear reason.
-
 - `ctx-notify-send.sh "<title>" "<subtitle>" "<body>"` sends a desktop notification when an automatic run starts or finishes, and whenever a run stops partway (manual runs too). Without it (and always on Windows) the mod raises Claude Code's own notification instead; in the desktop app that reaches only your `Notification` hooks.
+
+Each session keeps the mod's last 300 decisions in `~/.claude/context-refresh-<session>.log`, to read when a refresh stops for no clear reason.
 
 #### Tuning knobs (defaults are deliberate — change them here if you want different behavior)
 
@@ -178,8 +179,9 @@ Copy-Item -Force "$src\hooks\*.ps1", "$src\hooks\*.sh" "$env:USERPROFILE\.claude
 
 1. Claude が mod のツール `mcp__context-refresh__refresh` を呼びます。普通の言葉で頼んだときのほか、`/context-refresh` や 90% の自動実行では mod が「ツールを呼んで」と頼みます。ツールを呼んだそのターンで `context-snapshot-clear` と同じスナップショットと `.git.txt` を書き、ターンを終えます。その間にほかのターン（バックグラウンドの Monitor の通知、あなたの次の発言など）が終わっても無視します。
 2. ターンが終わると、mod は `~/.claude` から今回の実行中に書かれたスナップショットを更新時刻で探します。ファイル名を予測しないので、Claude のシェルが書く前に `cd` していても見つかります。複数あれば、今のディレクトリ、プロジェクトのルートの順に選びます。
-3. mod が `/compact` を起動し、その compact に自分で答えて会話をマーカー1行だけにします。要約は作りません。1行残すのは、メッセージが0件になる compact をエンジンが受け付けないためです。
-4. mod が `context-restore` を起動するプロンプトを送ります。スナップショットはいつもどおり `restore-context.sh` が注入します。
+3. 空にする前に、mod がスナップショットの末尾に付録を足します。会話から機械的に抜き出したもので、あなたの発言の原文（1件500字まで）、Edit・Write・NotebookEdit で編集したファイル、会話に出た URL、セッションの会話記録ファイルのパスです。判断で書くスナップショットはこうしたものを落とすことがあり、実際の実行では公開済みのページ2件と Slack のスレッドが抜けました。付録を作れなかったときは、書かれたスナップショットのままリフレッシュを続けます。
+4. mod が `/compact` を起動し、その compact に自分で答えて会話をマーカー1行だけにします。要約は作りません。1行残すのは、メッセージが0件になる compact をエンジンが受け付けないためです。
+5. mod が `context-restore` を起動するプロンプトを、会話記録ファイルのパスを添えて送ります。スナップショットはいつもどおり `restore-context.sh` が注入します。会話は空になっても会話記録の `.jsonl` には全部残っているので、スナップショットにも付録にも無いことは、`context-restore` があなたに聞く前にそこを検索します。
 
 普通の言葉で頼むこともできます（「コンテキストリフレッシュして」など）。mod が `mcp__context-refresh__refresh` というツールを登録しており、Claude はまずそれを呼び、同じターンでスナップショットを書きます。残りは mod が進めます。ターンが普通に終わった時点でコンテキストが 90% 以上なら、自動で始まります。
 
@@ -211,9 +213,9 @@ mod が入っていないセッションでリフレッシュを頼むと、`con
 次のファイルが `~/.claude/hooks/` にあれば使います（同梱していません）：
 
 - `ctx-config.sh` の `CTX_AUTO_REFRESH_THRESHOLD` で、自動起動の 90% を変えられます。
-mod の直近 300 件の判断は、セッションごとに `~/.claude/context-refresh-<セッション>.log` に残ります。理由が分からず止まったときに読みます。
-
 - `ctx-notify-send.sh "<タイトル>" "<サブタイトル>" "<本文>"` があれば、自動実行の開始・完了と、途中で止まったとき（手動でも）をデスクトップ通知します。無ければ（Windows では常に）Claude Code 標準の通知を使います。デスクトップアプリでは、`Notification` フックにだけ届きます。
+
+mod の直近 300 件の判断は、セッションごとに `~/.claude/context-refresh-<セッション>.log` に残ります。理由が分からず止まったときに読みます。
 
 #### 調整ポイント（デフォルトは意図的な設計です — 変えたい場合はここ）
 
