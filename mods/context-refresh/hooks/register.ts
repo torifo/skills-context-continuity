@@ -48,6 +48,7 @@ const requestPrompt = (trigger: string) =>
 const TOOL_DESCRIPTION =
   'Context refresh: saves a snapshot, empties this conversation while keeping the same session id, then resumes from the snapshot automatically. ' +
   'Call this when the user asks to refresh the context (e.g. 「コンテキストリフレッシュして」「リフレッシュして」「context refresh」) or when the context-refresh mod asks you to. ' +
+  'Do not call it when the user only mentions a refresh (for example that one stopped) without asking for one now. ' +
   'Call it first, then follow its result. Never run /clear or /compact for this.'
 
 const toolResult = () =>
@@ -180,7 +181,7 @@ async function finish($: EngineInterface, outcome: { failed: string } | 'restore
 
 // The turn running this tool call writes the snapshot.
 async function bindSnapshotTurn($: EngineInterface) {
-  if (phase === 'idle') {
+  if (phase === 'idle' || phase === 'snapshotting') {
     autoAt = undefined
     percentAtStart = (await $.session.usage()).context.percent
   }
@@ -286,7 +287,12 @@ export const register: Register = on => {
       return { result: 'この依頼はもう済んでいます。この呼び出しは何もしません。リフレッシュは動いていないので、今の作業をそのまま続けてください。' }
     }
     // Worded so the model goes on with its work: "do nothing" was once read as "stop working" for every later turn.
-    if (phase !== 'idle' && phase !== 'pending') return { result: `context-refresh は別のターンで実行中です（${phase}）。この呼び出しは何もしません。待たずに、今の作業をそのまま続けてください。` }
+    if (phase === 'snapshotting' && currentTurnId !== undefined && currentTurnId === snapshotTurnId) return { result: toolResult() }
+    if (phase === 'compacting') return { result: `context-refresh は別のターンで実行中です（${phase}）。この呼び出しは何もしません。待たずに、今の作業をそのまま続けてください。` }
+    // The conversation is already empty: a new snapshot now would overwrite the good one with almost nothing.
+    if (phase === 'restoring') return { result: '直前のリフレッシュで会話はもう空にしてあります。新しいスナップショットは書かず、context-restore スキルの手順でスナップショットから復元してから、作業を続けてください。' }
+    // A newer turn asks while an older snapshot turn never finished: start over from scratch.
+    if (phase === 'snapshotting') await log($, 'restart', { from: snapshotTurnId, to: currentTurnId })
     await bindSnapshotTurn($)
 
     return { result: toolResult() }

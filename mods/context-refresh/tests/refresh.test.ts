@@ -268,12 +268,32 @@ test('auto: an aborted turn at 95% does not start a refresh', async ($, on) => {
   expect(w.prompts).toHaveLength(0)
 })
 
-test('the tool refuses a second run while one is in progress', async ($, on) => {
+test('calling the tool twice in the same turn repeats the instructions', async ($, on) => {
   world($, on)
   await boot($)
   await startTurn($, 'コンテキストリフレッシュして')
   await callTool($)
-  expect(JSON.stringify(await callTool($))).toContain('実行中')
+  expect(JSON.stringify(await callTool($))).toContain('context-snapshot-refresh')
+})
+
+test('a newer turn asking again while an older snapshot turn never finished starts over from scratch', async ($, on) => {
+  const w = world($, on)
+  await boot($)
+  await startTurn($, 'コンテキストリフレッシュして')
+  await callTool($)
+  // That turn never ends (stopped, lost): the person asks again later.
+  expect(await toolTurn($, 'もう一度コンテキストリフレッシュして')).toContain('context-snapshot-refresh')
+  await w.clock.advance(400)
+  expect(w.compactedTo).toEqual([RESET])
+})
+
+test('while the restore is still to come, a new request is told to restore instead of writing a new snapshot', async ($, on) => {
+  const w = world($, on)
+  await boot($)
+  await toolTurn($, 'コンテキストリフレッシュして')
+  await w.clock.advance(400)
+  expect(await toolTurn($, 'コンテキストリフレッシュして')).toContain('context-restore スキルの手順でスナップショットから復元')
+  expect(w.compactedTo).toHaveLength(1)
 })
 
 test('the model cd-s before writing: the snapshot it actually wrote is found and used', async ($, on) => {
